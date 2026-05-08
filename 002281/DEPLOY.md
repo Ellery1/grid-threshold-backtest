@@ -55,7 +55,7 @@ python3.13 alert.py
 ```bash
 cd /opt/grid-threshold-backtest/002281
 mkdir -p logs
-nohup python3.13 alert.py >> logs/alert.log 2>&1 &
+nohup python3.13 -u alert.py >> logs/alert.log 2>&1 &
 ```
 
 确认进程在跑：
