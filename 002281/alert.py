@@ -68,7 +68,7 @@ def get_signal(df):
         'high': latest['high'],
         'low': latest['low'],
         'pct_chg': latest.get('pct_chg', 0),
-        'recent': df.tail(10)[['open', 'close', 'high', 'low']]
+        'recent': df.tail(10)[['open', 'close', 'high', 'low', 'pct_chg']]
     }
 
 
@@ -116,9 +116,11 @@ def build_email(signal):
 
     subject = f"[{strategy_action}] {STOCK_NAME}({STOCK_CODE}) - {today}"
 
-    recent_html = "<table border='1' cellpadding='4' style='border-collapse:collapse'><tr><th>日期</th><th>开盘</th><th>最高</th><th>最低</th><th>收盘</th></tr>"
+    recent_html = "<table border='1' cellpadding='4' style='border-collapse:collapse'><tr><th>日期</th><th>开盘</th><th>最高</th><th>最低</th><th>收盘</th><th>涨跌幅</th></tr>"
     for idx, row in signal['recent'].iterrows():
-        recent_html += f"<tr><td>{idx.strftime('%m-%d')}</td><td>{row['open']:.2f}</td><td>{row['high']:.2f}</td><td>{row['low']:.2f}</td><td>{row['close']:.2f}</td></tr>"
+        chg = row.get('pct_chg', 0)
+        chg_color = 'red' if chg >= 0 else 'green'
+        recent_html += f"<tr><td>{idx.strftime('%m-%d')}</td><td>{row['open']:.2f}</td><td>{row['high']:.2f}</td><td>{row['low']:.2f}</td><td>{row['close']:.2f}</td><td style='color:{chg_color}'>{chg:+.2f}%</td></tr>"
     recent_html += "</table>"
 
     body = f"""
