@@ -5,39 +5,45 @@
 ### 1.1 拉取代码
 
 ```bash
-cd ~
+cd /opt
 git clone https://github.com/Ellery1/grid-threshold-backtest.git
-cd grid-threshold-backtest
 ```
 
-### 1.2 安装依赖
+### 1.2 安装 Python 3.13 及依赖
 
 ```bash
-pip3 install tushare pandas python-dotenv
+# 编译安装 Python 3.13（如已有则跳过）
+sudo yum install -y gcc openssl-devel bzip2-devel libffi-devel zlib-devel
+cd /tmp
+wget https://mirrors.aliyun.com/python-release/source/Python-3.13.0.tgz
+tar -xzf Python-3.13.0.tgz
+cd Python-3.13.0
+./configure --enable-optimizations
+make -j$(nproc)
+sudo make altinstall
+
+# 安装 pip 包
+python3.13 -m pip install tushare pandas python-dotenv -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
 ```
 
 ### 1.3 配置 .env（tushare token）
 
-创建 `grid-threshold-backtest/.env`：
-
 ```bash
-echo "TUSHARE_TOKEN=你的tushare_token" > ~/grid-threshold-backtest/.env
+echo "TUSHARE_TOKEN=你的tushare_token" > /opt/grid-threshold-backtest/.env
 ```
 
 ### 1.4 配置邮箱密码
 
-复制模板并填入真实密码：
-
 ```bash
-cp grid-threshold-backtest/002281/email_config.example.py grid-threshold-backtest/002281/email_config.py
-vim grid-threshold-backtest/002281/email_config.py    # 改成你的邮箱和授权码
+cp /opt/grid-threshold-backtest/002281/email_config.example.py /opt/grid-threshold-backtest/002281/email_config.py
+vim /opt/grid-threshold-backtest/002281/email_config.py
 ```
 
 ### 1.5 手工跑一次验证
 
 ```bash
-cd ~/grid-threshold-backtest/002281
-python3 alert.py
+cd /opt/grid-threshold-backtest/002281
+python3.13 alert.py
 ```
 
 首次运行会立即执行一次检查并发送邮件，然后打印 `下次执行: 20xx-xx-xx 09:00:00`。如果收到邮件说明一切正常，按 `Ctrl+C` 停掉。
@@ -47,9 +53,9 @@ python3 alert.py
 ## 二、启动守护进程（长期运行）
 
 ```bash
-cd ~/grid-threshold-backtest/002281
+cd /opt/grid-threshold-backtest/002281
 mkdir -p logs
-nohup python3 alert.py >> logs/alert.log 2>&1 &
+nohup python3.13 alert.py >> logs/alert.log 2>&1 &
 ```
 
 确认进程在跑：
@@ -66,7 +72,7 @@ tail -f logs/alert.log
 ## 三、更新代码
 
 ```bash
-cd ~/grid-threshold-backtest
+cd /opt/grid-threshold-backtest
 git pull origin master
 ```
 
@@ -74,8 +80,8 @@ git pull origin master
 
 ```bash
 pkill -f alert.py
-cd ~/grid-threshold-backtest/002281
-nohup python3 alert.py >> logs/alert.log 2>&1 &
+cd /opt/grid-threshold-backtest/002281
+nohup python3.13 alert.py >> logs/alert.log 2>&1 &
 ```
 
 ---
@@ -83,7 +89,7 @@ nohup python3 alert.py >> logs/alert.log 2>&1 &
 ## 四、工作原理
 
 ```
-python3 alert.py 启动
+python3.13 alert.py 启动
     ↓
 立即执行一次检查 → 发邮件
     ↓
@@ -105,34 +111,27 @@ sleep 等待
 
 ---
 
-## 五、邮件示例
+## 五、常见问题
 
-**标题**：`[✅ 持仓中] 光迅科技(002281) MA10策略 - 2026-05-08`
-
-**正文**包含：股票名称代码、昨日收盘及涨跌幅、MA10 值及价差、操作建议、最近 10 日走势表。
-
----
-
-## 六、常见问题
-
-### Q1: `ModuleNotFoundError: No module named 'tushare'`
-
-```bash
-pip3 install tushare pandas python-dotenv
-```
-
-### Q2: 邮件发不出去
+### Q1: 邮件发不出去
 
 - 确认 QQ 邮箱已开启 SMTP（设置 → 账户 → POP3/IMAP/SMTP）
 - 授权码不是 QQ 密码，是生成的 16 位码
-- 阿里云 ECS 587 端口通常可用，如果被封用 465（SSL）
+- 阿里云 ECS 587 端口通常可用
 
-### Q3: 怎么停掉守护进程？
+### Q2: 怎么停掉守护进程？
 
 ```bash
 pkill -f alert.py
 ```
 
-### Q4: 节假日会不会发不必要的邮件？
+### Q3: 节假日会不会发不必要的邮件？
 
-脚本会在周末自动跳过，但法定节假日（如五一、国庆）会照常运行。当天 tushare 拉到的仍是节前最后交易日的数据，邮件会说"继续持有/观望"，无害。
+周末自动跳过，法定节假日会照常运行但邮件内容是"继续持有/观望"，无害。
+
+### Q4: 安装依赖超时？
+
+用清华镜像：
+```bash
+python3.13 -m pip install tushare pandas python-dotenv -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+```
