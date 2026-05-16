@@ -11,21 +11,43 @@ from stocks.base import BaseStrategy
 from reports.generator import ReportGenerator
 
 
+SUBDIRS = ['qualified', 'disqualified', 'candidates']
+
+
 def _import_stock(code):
-    for sub in ['qualified', 'unqualified']:
+    for sub in SUBDIRS:
         try:
             return __import__(f'stocks.{sub}.{code}', fromlist=['strategy', 'config'])
         except ModuleNotFoundError:
             continue
-    raise ModuleNotFoundError(f"股票 {code} 不在 qualified 或 unqualified 中")
+    raise ModuleNotFoundError(f"股票 {code} 不在 qualified/disqualified/candidates 中")
 
 
 def _stock_subdir(code):
-    for sub in ['qualified', 'unqualified']:
+    for sub in SUBDIRS:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', sub, code)
         if os.path.isdir(p):
             return sub
-    return 'qualified'
+    return 'candidates'
+
+
+def _ensure_stock_dir(code, fetcher, start, end):
+    """创建股票目录（若不存在则放在 candidates/ 下）"""
+    for sub in SUBDIRS:
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', sub, code)
+        if os.path.isdir(d):
+            return
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', 'candidates', code)
+    os.makedirs(os.path.join(d, 'reports'), exist_ok=True)
+    with open(os.path.join(d, '__init__.py'), 'w', encoding='utf-8'): pass
+    with open(os.path.join(d, 'strategy.py'), 'w', encoding='utf-8') as f:
+        f.write('from stocks.grid_strategy import GridThresholdStrategy\n')
+    ts_code = f'{code}.SH' if code.startswith(('6', '9')) else f'{code}.SZ'
+    with open(os.path.join(d, 'config.py'), 'w', encoding='utf-8') as f:
+        f.write(f'STOCK_CODE="{code}"\nSTOCK_NAME="X"\nTS_CODE="{ts_code}"\n'
+                f'INIT_CASH=100000\nCOMMISSION=0.001\n'
+                f'BACKTEST_START="{start}"\nBACKTEST_END="{end}"\n'
+                f'BEST_BUY=None\nBEST_SELL=None\n')
 
 
 def _run_backtest(code, args, fetcher):
@@ -51,7 +73,7 @@ def _run_backtest(code, args, fetcher):
     lo = float(df['low'].min())
     hi = float(df['high'].max())
     p50 = float(df['close'].median())
-    step = 0.01 if p50 <= 10 else (0.05 if p50 <= 100 else 0.1)
+    step = 0.01 if p50 <= 5 else (0.02 if p50 <= 10 else (0.1 if p50 <= 50 else (0.5 if p50 <= 100 else 1)))
 
     complete = [t for t in best_trades if 'sell_date' in t]
     hd = [(t['sell_date'] - t['buy_date']).days for t in complete] if complete else []
@@ -83,7 +105,7 @@ def _run_backtest(code, args, fetcher):
         'param_desc': strategy.describe_params(best_params),
         'param_grid_info': {
             'window_lo': round(lo, 2),
-            'window_hi': round(hi * 1.05, 2),
+            'window_hi': round(hi, 2),
             'step': step,
             'combinations': len(grid),
         },
@@ -223,6 +245,7 @@ def cmd_batch(args):
         print(f"\n{'#' * 60}")
         print(f"# {code}")
         print(f"{'#' * 60}")
+        _ensure_stock_dir(code, fetcher, args.start, args.end)
         try:
             record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
                 _run_backtest(code, args, fetcher)
@@ -267,8 +290,8 @@ def cmd_batch(args):
 
     today = datetime.now().strftime('%Y-%m-%d')
     fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      'stocks', f'网格策略对比_批量_{today}.md')
-    lines = [f"# 网格策略对比 — 批量回测\n",
+                      'stocks', f'网格策略对比_第{args.batch}批_{today}.md')
+    lines = [f"# 网格策略对比 — 第{args.batch}批\n",
              f"> {args.start} ~ {args.end} | 本金{args.cash:,.0f} | 佣金{args.commission:.1%} | 固定不复利\n",
              "---\n## 一、综合排名\n",
              "| # | 代码 | 名称 | B(元) | S(元) | 价差% | 收益率 | 年化 | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 箱体(元) | 步长(元) |",
@@ -315,6 +338,72 @@ def cmd_batch(args):
         f.write('\n'.join(lines) + '\n')
     print(f"\n综合报告: {fp}")
     print(f"✅{len(good)} ⚠️{len(ok)} ❌{len(bad)}")
+
+    import shutil
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks')
+    for r in good:
+        src = os.path.join(base, 'candidates', r['code'])
+        dst = os.path.join(base, 'qualified', r['code'])
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.move(src, dst)
+            print(f"  迁移: {r['code']} → qualified")
+    for r in bad:
+        src = os.path.join(base, 'candidates', r['code'])
+        dst = os.path.join(base, 'disqualified', r['code'])
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.move(src, dst)
+            print(f"  迁移: {r['code']} → disqualified")
+    for r in ok:
+        src = os.path.join(base, 'candidates', r['code'])
+        dst = os.path.join(base, 'disqualified', r['code'])
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.move(src, dst)
+            print(f"  迁移: {r['code']} → disqualified (观察)")
+
+    _update_comparison_doc(results, args.batch, good, ok, bad)
+
+
+def _update_comparison_doc(results, batch, good, ok, bad):
+    """追加本批结果到 A类股_网格搜索_横向对比.md"""
+    cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       'A类股_网格搜索_横向对比.md')
+    if not os.path.exists(cmp):
+        return
+
+    with open(cmp, encoding='utf-8') as f:
+        lines = f.read().split('\n')
+
+    insert_pos = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith('|') and '✅' in line and '|' in line:
+            insert_pos = i + 1
+
+    if insert_pos is None:
+        return
+
+    sr = sorted(results, key=lambda x: x['return'], reverse=True)
+    tag = lambda r: '✅ 合格' if r in good else ('⚠️ 仅2轮' if r in ok else '❌')
+    ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
+    industry = {
+        '600511': '医药商业', '000089': '机场', '000883': '水力发电',
+        '600572': '中成药', '600283': '水务', '000529': '食品',
+        '600008': '水务', '600018': '港口', '601128': '银行', '601139': '供气供热',
+    }
+
+    new_rows = []
+    for idx, r in enumerate(sr):
+        ind = industry.get(r['code'], '')
+        new_rows.append(
+            f"| {batch} | {idx+1} | {r['code']} | {r['name']} | {ind} | "
+            f"{r['B']:.2f} | {r['S']:.2f} | {r['return']:.2f}% | "
+            f"{ann_s(r)} | {r['trades']} | {r['step']} | {tag(r)} |")
+
+    for row in reversed(new_rows):
+        lines.insert(insert_pos, row)
+
+    with open(cmp, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    print(f"  横向对比文档已更新: {cmp}")
 
 
 def cmd_daemon(args):
@@ -387,6 +476,7 @@ def main():
 
     ba = sub.add_parser('batch', help='批量回测 + 生成综合对比报告')
     ba.add_argument('--codes', required=True, help='股票代码，逗号分隔，如 "601128,601139,600572"')
+    ba.add_argument('--batch', type=int, default=2, help='批次编号，用于报告命名')
     ba.add_argument('--strategy', default='GridThresholdStrategy', help='策略类名')
     ba.add_argument('--start', default='2024-06-01', help='开始日期 (YYYY-MM-DD)')
     ba.add_argument('--end', default='2026-05-16', help='结束日期 (YYYY-MM-DD)')

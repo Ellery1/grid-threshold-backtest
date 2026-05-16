@@ -13,15 +13,19 @@ class GridThresholdStrategy(BaseStrategy):
         hi = float(df['high'].max())
         p50 = float(df['close'].median())
 
-        if p50 <= 10:
+        if p50 <= 5:
             step = 0.01
-        elif p50 <= 100:
-            step = 0.05
-        else:
+        elif p50 <= 10:
+            step = 0.02
+        elif p50 <= 50:
             step = 0.1
+        elif p50 <= 100:
+            step = 0.5
+        else:
+            step = 1
 
         window_lo = round(lo, 2)
-        window_hi = round(hi * 1.05, 2)
+        window_hi = round(hi, 2)
         rng = np.round(np.arange(window_lo, window_hi + step, step), 2)
 
         result = []
@@ -191,6 +195,12 @@ class GridThresholdStrategy(BaseStrategy):
         best_trades = None
         total = len(param_grid)
 
+        step = 0.01
+        for i in range(1, len(param_grid)):
+            if param_grid[i]['B'] != param_grid[0]['B']:
+                step = param_grid[i]['B'] - param_grid[0]['B']
+                break
+
         for idx, params in enumerate(param_grid):
             final_value, trades, _ = self.backtest(df, params)
             total_return = (final_value - self.init_cash) / self.init_cash * 100
@@ -204,8 +214,10 @@ class GridThresholdStrategy(BaseStrategy):
                 print(
                     f"  进度: {idx + 1}/{total} "
                     f"({(idx + 1) / total * 100:.1f}%), "
+                    f"步长={step:.2f}, "
                     f"当前最优: B={best_params['B']:.2f} S={best_params['S']:.2f} "
-                    f"收益率={best_return:.2f}%"
+                    f"收益率={best_return:.2f}%",
+                    flush=True,
                 )
 
         return best_params, best_return, best_trades
