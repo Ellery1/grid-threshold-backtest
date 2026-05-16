@@ -1,290 +1,298 @@
-import pandas as pd
-import numpy as np
-import tushare as ts
-from datetime import datetime
-import warnings
 import os
+import sys
+import argparse
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
-warnings.filterwarnings('ignore')
+from data.fetcher import DataFetcher
+from stocks.base import BaseStrategy
+from reports.generator import ReportGenerator
 
-ts.set_token(os.getenv('TUSHARE_TOKEN'))
-pro = ts.pro_api()
+
+def _import_stock(code):
+    for sub in ['qualified', 'unqualified']:
+        try:
+            return __import__(f'stocks.{sub}.{code}', fromlist=['strategy', 'config'])
+        except ModuleNotFoundError:
+            continue
+    raise ModuleNotFoundError(f"股票 {code} 不在 qualified 或 unqualified 中")
 
 
-class GtechQuantStrategy:
-    def __init__(self, stock_code='000727', init_cash=100000):
-        self.stock_code = stock_code
-        self.init_cash = init_cash
-        self.data = None
+def _stock_subdir(code):
+    for sub in ['qualified', 'unqualified']:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', sub, code)
+        if os.path.isdir(p):
+            return sub
+    return 'qualified'
 
-    def fetch_data(self, start_date='2023-01-01', end_date=None):
-        if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
 
-        self.start_date = start_date
-        self.end_date = end_date
+def cmd_backtest(args):
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
+        sys.exit(1)
 
-        if self.stock_code.startswith('sz'):
-            ts_code = self.stock_code[2:] + '.SZ'
-        elif self.stock_code.startswith('sh'):
-            ts_code = self.stock_code[2:] + '.SH'
-        else:
-            ts_code = self.stock_code + '.SZ'
+    fetcher = DataFetcher(token)
+    today = datetime.now().strftime('%Y-%m-%d')
 
-        print(f"获取股票数据: {self.stock_code}({ts_code})，时间范围: {start_date} 至 {end_date}")
+    start = args.start or '2025-01-01'
+    end = args.end or today
 
-        stock_data = pro.daily(
-            ts_code=ts_code,
-            start_date=start_date.replace('-', ''),
-            end_date=end_date.replace('-', ''),
-            adj='qfq'
+    strategy_module = _import_stock(args.code)
+    config = strategy_module.config
+    strategy_cls = getattr(strategy_module.strategy, args.strategy)
+
+    print(f"\n{'=' * 60}")
+    print(
+        f"{config.STOCK_CODE} {config.STOCK_NAME} "
+        f"— {args.strategy} 回测"
+    )
+    print(f"{'=' * 60}")
+
+    print(f"\n拉取数据: {config.TS_CODE} ({start} ~ {end})")
+    df = fetcher.fetch(config.TS_CODE, start, end)
+    print(
+        f"数据: {len(df)} 条, "
+        f"{df.index[0].strftime('%Y-%m-%d')} ~ "
+        f"{df.index[-1].strftime('%Y-%m-%d')}"
+    )
+    price_range = f"Y{df['close'].min():.2f} ~ Y{df['close'].max():.2f}"
+    print(f"价格区间: {price_range}")
+
+    strategy = strategy_cls(
+        stock_code=config.STOCK_CODE,
+        stock_name=config.STOCK_NAME,
+        init_cash=args.cash,
+        commission=args.commission,
+    )
+
+    grid = strategy.param_grid(df)
+    print(f"\n搜索空间: {len(grid)} 组参数组合")
+
+    best_params, best_return, best_trades = strategy.optimize(df, grid)
+    final_value, _, days = strategy.backtest(df, best_params)
+    metrics = strategy.calc_metrics(final_value, best_trades, days)
+
+    print(f"\n{'=' * 60}")
+    print("最优参数")
+    print(f"{'=' * 60}")
+    print(f"  {strategy.describe_params(best_params)}")
+    print(f"  收益率: {metrics['total_return']:.2f}%")
+    print(f"  年化: {metrics['annual_return']:.0f}%")
+    print(f"  交易: {metrics['trade_count']} 轮")
+    print(f"  胜率: {metrics['win_rate']:.0f}%")
+    print(f"  均持: {metrics['avg_hold_days']:.1f} 天")
+
+    if not args.no_report:
+        output_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'stocks', _stock_subdir(args.code), args.code, 'reports',
+        )
+        report = ReportGenerator(output_dir)
+
+        lo = float(df['low'].min())
+        hi = float(df['high'].max())
+        p50 = float(df['close'].median())
+        step = 0.01 if p50 <= 10 else (0.05 if p50 <= 100 else 0.1)
+
+        report.generate_backtest_report(
+            stock_code=config.STOCK_CODE,
+            stock_name=config.STOCK_NAME,
+            strategy_name=args.strategy,
+            params=best_params,
+            param_desc=strategy.describe_params(best_params),
+            param_grid_info={
+                'window_lo': round(lo, 2),
+                'window_hi': round(hi * 1.05, 2),
+                'step': step,
+                'combinations': len(grid),
+            },
+            result=metrics,
+            trades=best_trades,
+            pricing_model_desc='限价条件单',
+            start_date=start,
+            end_date=end,
+            trading_days=len(df),
         )
 
-        if stock_data.empty:
-            print("获取到空数据，请检查股票代码或时间范围")
-            return
+    summary_trades = best_trades[:10] if len(best_trades) > 10 else best_trades
+    complete = [t for t in summary_trades if 'sell_date' in t]
+    if complete:
+        print(f"\n前 {len(complete)} 轮交易明细:")
+        for t in complete:
+            bd = t['buy_date'].strftime('%Y-%m-%d')
+            sd = t['sell_date'].strftime('%Y-%m-%d')
+            hd = (t['sell_date'] - t['buy_date']).days
+            print(
+                f"  {bd} ~ {sd}  "
+                f"{hd}天  "
+                f"¥{t.get('profit', 0):+,.0f}"
+            )
 
-        stock_data.rename(columns={
-            'trade_date': '日期',
-            'open': '开盘',
-            'close': '收盘',
-            'high': '最高',
-            'low': '最低',
-            'vol': '成交量',
-            'pct_chg': '涨跌幅'
-        }, inplace=True)
 
-        stock_data['日期'] = pd.to_datetime(stock_data['日期'])
-        stock_data.set_index('日期', inplace=True)
-        stock_data = stock_data.sort_index()
+def cmd_compare(args):
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
+        sys.exit(1)
 
-        required_columns = ['开盘', '收盘', '最高', '最低', '成交量', '涨跌幅']
-        self.data = stock_data[required_columns]
+    fetcher = DataFetcher(token)
+    today = datetime.now().strftime('%Y-%m-%d')
 
-        print(f"成功获取{self.stock_code}数据，时间范围: {start_date} 至 {end_date}")
-        print(f"数据量: {len(self.data)}条")
-        print(f"价格分布: 最低 ¥{self.data['最低'].min():.2f} / 最高 ¥{self.data['最高'].max():.2f} / 均值 ¥{self.data['收盘'].mean():.2f}")
+    start = args.start or '2025-01-01'
+    end = args.end or today
 
-    def generate_trade_log(self, start_date='2024-06-30', end_date=None, buy_threshold=2.55, sell_threshold=2.8, verbose=False):
-        if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+    strategy_module = _import_stock(args.code)
+    config = strategy_module.config
+    strategy_cls = getattr(strategy_module.strategy, args.strategy)
 
-        if self.data is None:
-            print("请先调用 fetch_data() 获取数据")
-            return None, 0
+    print(f"\n拉取数据: {config.TS_CODE} ({start} ~ {end})")
+    df = fetcher.fetch(config.TS_CODE, start, end)
+    print(f"数据: {len(df)} 条, 价格: ¥{df['close'].min():.2f} ~ ¥{df['close'].max():.2f}")
 
-        df = self.data.loc[start_date:end_date].copy()
+    strategy = strategy_cls(
+        stock_code=config.STOCK_CODE,
+        stock_name=config.STOCK_NAME,
+        init_cash=args.cash,
+        commission=args.commission,
+    )
 
-        if df.empty:
-            print(f"指定时间范围 {start_date} 至 {end_date} 内无数据")
-            return None, 0
+    scenarios = []
+    for param_spec in args.params:
+        parts = param_spec.split(',')
+        label = parts[0]
+        B = float(parts[1])
+        S = float(parts[2])
+        p = {'B': B, 'S': S}
 
-        fixed_capital = self.init_cash
-        shares_per_trade = int(fixed_capital / (buy_threshold * 1.001))
-        if shares_per_trade <= 0:
-            print("资金不足以买入1股，请调整参数")
-            return None, 0
+        final_value, trades, days = strategy.backtest(df, p)
+        metrics = strategy.calc_metrics(final_value, trades, days)
 
-        shares = 0
-        holding = False
-        total_profit = 0
-        last_buy_cost = 0
-        fund = fixed_capital
-        prev_fund = fixed_capital
+        scenarios.append({
+            'label': label,
+            'param_desc': strategy.describe_params(p),
+            'period': f'{start} ~ {end}',
+            'trading_days': len(df),
+            'result': metrics,
+            'trades': trades,
+        })
 
-        trade_log = []
-
-        for i, row in df.iterrows():
-            date = i
-            low_price = row['最低']
-            high_price = row['最高']
-            close_price = row['收盘']
-
-            if not holding:
-                if low_price < buy_threshold:
-                    action = '买入'
-                    shares = shares_per_trade
-                    last_buy_cost = shares * buy_threshold * 1.001
-                    holding = True
-                else:
-                    action = '观望'
-            else:
-                if high_price > sell_threshold:
-                    action = '卖出'
-                    revenue = shares * sell_threshold * 0.999
-                    total_profit += revenue - last_buy_cost
-                    shares = 0
-                    holding = False
-                else:
-                    action = '持有'
-
-            if holding:
-                fund = fixed_capital + total_profit - last_buy_cost + shares * close_price
-            else:
-                fund = fixed_capital + total_profit
-
-            profit_loss_rate = 0.0 if i == df.index[0] else (fund - prev_fund) / prev_fund * 100
-            prev_fund = fund
-
-            trade_log.append({
-                '日期': date,
-                '最低价': low_price,
-                '最高价': high_price,
-                '开盘价': row['开盘'],
-                '收盘价': close_price,
-                '操作': action,
-                '资金': fund,
-                '盈亏率': profit_loss_rate
-            })
-
-        trade_log_df = pd.DataFrame(trade_log)
-
-        if verbose:
-            print("\n" + "=" * 80)
-            print(f"交易日志 (买入阈值: {buy_threshold}, 卖出阈值: {sell_threshold})")
-            print("=" * 80)
-            print(trade_log_df.to_string(index=False, formatters={
-                '日期': lambda x: x.strftime('%Y-%m-%d'),
-                '最低价': '{:.2f}'.format,
-                '最高价': '{:.2f}'.format,
-                '开盘价': '{:.2f}'.format,
-                '收盘价': '{:.2f}'.format,
-                '资金': '{:.2f}'.format,
-                '盈亏率': '{:.2f}%'.format
-            }))
-
-        total_return = (fund - self.init_cash) / self.init_cash * 100
-        if verbose:
-            print(f"\n最终资金: ¥{fund:.2f}")
-            print(f"总收益率: {total_return:.2f}%")
-
-        return trade_log_df, total_return
-
-    def optimize_thresholds(self, start_date='2024-06-30', end_date=None):
-        if end_date is None:
-            end_date = datetime.now().strftime('%Y-%m-%d')
-
-        if self.data is None:
-            self.fetch_data(start_date=start_date, end_date=end_date)
-
-        if self.data is None:
-            print("数据获取失败，无法优化")
-            return None, None, None
-
-        lo = self.data['最低'].min()
-        hi = self.data['最高'].max()
-        window_lo = np.round(lo, 2)
-        window_hi = np.round(hi * 1.05, 2)
-
-        p50 = self.data['收盘'].median()
-        if p50 <= 10:
-            step = 0.01
-        elif p50 <= 100:
-            step = 0.1
-        else:
-            step = 0.5
-
-        print("===== 自动推导搜索参数 =====")
-        print(f"价格分布: 最低 ¥{lo:.2f} / 中位数 ¥{p50:.2f} / 最高 ¥{hi:.2f}")
-        print(f"搜索窗口: ({window_lo}, {window_hi})")
-        print(f"步长: {step}  (中位数{'<10' if p50 <= 10 else '<100' if p50 <= 100 else '>=100'}，自动选择)")
-        print("=============================")
-
-        print(f"\n开始优化阈值，时间范围: {start_date} 至 {end_date}")
-        print(f"买卖阈值范围: {window_lo} - {window_hi}, 步长: {step}")
-
-        thresholds = np.round(np.arange(window_lo, window_hi + step, step), decimals=2)
-
-        best_return = -float('inf')
-        best_buy_threshold = None
-        best_sell_threshold = None
-
-        total_combinations = len(thresholds) * len(thresholds)
-        print(f"总共有 {total_combinations} 种阈值组合需要测试")
-
-        for i, buy_threshold in enumerate(thresholds):
-            for j, sell_threshold in enumerate(thresholds):
-                if sell_threshold <= buy_threshold:
-                    continue
-
-                progress = (i * len(thresholds) + j + 1) / total_combinations * 100
-
-                _, total_return = self.generate_trade_log(
-                    start_date=start_date,
-                    end_date=end_date,
-                    buy_threshold=buy_threshold,
-                    sell_threshold=sell_threshold,
-                    verbose=False
-                )
-
-                if total_return > best_return:
-                    best_return = total_return
-                    best_buy_threshold = buy_threshold
-                    best_sell_threshold = sell_threshold
-                    print(f"找到更好的阈值组合: 买入={buy_threshold:.2f}, 卖出={sell_threshold:.2f}, 收益率={total_return:.2f}% (进度: {progress:.1f}%)")
-                elif (i * len(thresholds) + j + 1) % 10 == 0:
-                    print(f"测试进度: {progress:.1f}%, 当前最佳: 买入={best_buy_threshold:.2f}, 卖出={best_sell_threshold:.2f}, 收益率={best_return:.2f}%")
-
-        print("=" * 80)
-        print("阈值优化完成")
-        print(f"最佳买入阈值: {best_buy_threshold:.2f}")
-        print(f"最佳卖出阈值: {best_sell_threshold:.2f}")
-        print(f"最大收益率: {best_return:.2f}%")
-        print("=" * 80)
-
-        trade_log_df, _ = self.generate_trade_log(
-            start_date=start_date,
-            end_date=end_date,
-            buy_threshold=best_buy_threshold,
-            sell_threshold=best_sell_threshold,
-            verbose=False
+    print(f"\n{'=' * 60}")
+    print("参数对比")
+    print(f"{'=' * 60}")
+    for s in scenarios:
+        print(
+            f"  {s['label']}: {s['param_desc']} → "
+            f"{s['result']['total_return']:.2f}% "
+            f"({s['result']['trade_count']} 轮)"
         )
 
-        trades = trade_log_df[trade_log_df['操作'].isin(['买入', '卖出'])]
-        bt = trades[trades['操作'] == '买入'].reset_index(drop=True)
-        st = trades[trades['操作'] == '卖出'].reset_index(drop=True)
-        rounds = min(len(bt), len(st))
+    output_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'stocks', _stock_subdir(args.code), args.code, 'reports',
+    )
+    report = ReportGenerator(output_dir)
+    report.generate_comparison_report(
+        stock_code=config.STOCK_CODE,
+        stock_name=config.STOCK_NAME,
+        scenarios=scenarios,
+    )
 
-        print(f"\n===== 最佳参数交易明细 ({rounds} 轮) =====")
-        print(f"{'轮次':<6} {'买入日期':<8} {'买入日最低':<10} {'卖出日期':<8} {'卖出日最高':<10} {'持仓天数':<10}")
-        for i in range(rounds):
-            bd = bt.loc[i, '日期'].strftime('%Y-%m-%d')
-            sd = st.loc[i, '日期'].strftime('%Y-%m-%d')
-            bl = bt.loc[i, '最低价']
-            sh = st.loc[i, '最高价']
-            days = (st.loc[i, '日期'] - bt.loc[i, '日期']).days
-            print(f"第{i+1:2d}轮  {bd:<14} ¥{bl:<9.2f} {sd:<14} ¥{sh:<9.2f} {days:>5}天")
 
-        return best_buy_threshold, best_sell_threshold, best_return
+def cmd_daemon(args):
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
+        sys.exit(1)
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    from scheduler.daemon import run_daemon
+    from scheduler.mailer import Mailer
+
+    try:
+        from config.email import EmailConfig
+    except ImportError:
+        print("错误: config/email.py 不存在，请复制 config/email.example.py 并填写配置")
+        sys.exit(1)
+
+    fetcher = DataFetcher(token)
+    mailer = Mailer(EmailConfig)
+
+    stocks_config = []
+    for spec in args.stocks:
+        parts = spec.split(',')
+        code = parts[0]
+        strategy_name = parts[1]
+        holding = len(parts) > 2 and parts[2].lower() == 'true'
+
+        strategy_module = _import_stock(code)
+        config = strategy_module.config
+        strategy_cls = getattr(strategy_module.strategy, strategy_name)
+
+        strategy = strategy_cls(
+            stock_code=config.STOCK_CODE,
+            stock_name=config.STOCK_NAME,
+        )
+
+        params = {}
+        if (hasattr(config, 'BEST_BUY') and hasattr(config, 'BEST_SELL')
+                and config.BEST_BUY is not None and config.BEST_SELL is not None):
+            params = {'B': config.BEST_BUY, 'S': config.BEST_SELL}
+
+        stocks_config.append({
+            'stock_code': config.STOCK_CODE,
+            'stock_name': config.STOCK_NAME,
+            'ts_code': config.TS_CODE,
+            'strategy': strategy,
+            'strategy_params': params,
+            'user_holding': holding,
+            'email_subject_prefix': f'[{strategy_name}]',
+        })
+
+    run_daemon(stocks_config, fetcher, mailer, hour=args.hour, minute=args.minute)
 
 
 def main():
-    print("限价阈值网格策略系统")
-    print("=" * 50)
+    parser = argparse.ArgumentParser(description='量化策略平台')
+    sub = parser.add_subparsers(dest='command')
 
-    strategy = GtechQuantStrategy(stock_code='sz000727', init_cash=100000)
+    bt = sub.add_parser('backtest', help='回测 + 生成报告')
+    bt.add_argument('--code', default='000727', help='股票代码 (default: 000727)')
+    bt.add_argument('--strategy', default='GridThresholdStrategy', help='策略类名')
+    bt.add_argument('--start', help='开始日期 (YYYY-MM-DD)')
+    bt.add_argument('--end', help='结束日期 (YYYY-MM-DD)')
+    bt.add_argument('--cash', type=float, default=100000, help='初始本金')
+    bt.add_argument('--commission', type=float, default=0.001, help='佣金率')
+    bt.add_argument('--no-report', action='store_true', help='不生成报告')
+    bt.set_defaults(func=cmd_backtest)
 
-    start_date = '2024-09-01'
-    end_date = '2025-09-01'
-    strategy.fetch_data(start_date=start_date, end_date=end_date)
+    cp = sub.add_parser('compare', help='多参数对比')
+    cp.add_argument('--code', default='000727', help='股票代码')
+    cp.add_argument('--strategy', default='GridThresholdStrategy', help='策略类名')
+    cp.add_argument('--params', nargs='+', required=True,
+                    help='参数组: "标签,B,S" 如 "最优,2.59,2.71" "实战,2.60,2.75"')
+    cp.add_argument('--start', help='开始日期')
+    cp.add_argument('--end', help='结束日期')
+    cp.add_argument('--cash', type=float, default=100000)
+    cp.add_argument('--commission', type=float, default=0.001)
+    cp.set_defaults(func=cmd_compare)
 
-    print("\n" + "=" * 60)
-    print("生成交易日志...")
-    print("=" * 60)
-    trade_log_df, total_return = strategy.generate_trade_log(
-        start_date=start_date, end_date=end_date, verbose=True
-    )
+    dm = sub.add_parser('daemon', help='启动定时邮件守护进程')
+    dm.add_argument('--stocks', nargs='+', required=True,
+                    help='股票配置: "股票代码,策略类名,是否持仓" 如 "000727,GridThresholdStrategy,true"')
+    dm.add_argument('--hour', type=int, default=9)
+    dm.add_argument('--minute', type=int, default=0)
+    dm.set_defaults(func=cmd_daemon)
 
-    trades = trade_log_df[trade_log_df['操作'].isin(['买入', '卖出'])]
-    if len(trades) > 0:
-        print(f"\n交易次数: {len(trades)}")
-        print(f"收益率: {total_return:.2f}%")
+    args = parser.parse_args()
+    if args.command is None:
+        parser.print_help()
+    else:
+        args.func(args)
 
-    return strategy
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
