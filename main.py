@@ -28,38 +28,12 @@ def _stock_subdir(code):
     return 'qualified'
 
 
-def cmd_backtest(args):
-    token = os.getenv('TUSHARE_TOKEN')
-    if not token:
-        print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
-        sys.exit(1)
-
-    fetcher = DataFetcher(token)
-    today = datetime.now().strftime('%Y-%m-%d')
-
-    start = args.start or '2025-01-01'
-    end = args.end or today
-
-    strategy_module = _import_stock(args.code)
+def _run_backtest(code, args, fetcher):
+    strategy_module = _import_stock(code)
     config = strategy_module.config
     strategy_cls = getattr(strategy_module.strategy, args.strategy)
 
-    print(f"\n{'=' * 60}")
-    print(
-        f"{config.STOCK_CODE} {config.STOCK_NAME} "
-        f"— {args.strategy} 回测"
-    )
-    print(f"{'=' * 60}")
-
-    print(f"\n拉取数据: {config.TS_CODE} ({start} ~ {end})")
-    df = fetcher.fetch(config.TS_CODE, start, end)
-    print(
-        f"数据: {len(df)} 条, "
-        f"{df.index[0].strftime('%Y-%m-%d')} ~ "
-        f"{df.index[-1].strftime('%Y-%m-%d')}"
-    )
-    price_range = f"Y{df['close'].min():.2f} ~ Y{df['close'].max():.2f}"
-    print(f"价格区间: {price_range}")
+    df = fetcher.fetch(config.TS_CODE, args.start, args.end)
 
     strategy = strategy_cls(
         stock_code=config.STOCK_CODE,
@@ -69,21 +43,73 @@ def cmd_backtest(args):
     )
 
     grid = strategy.param_grid(df)
-    print(f"\n搜索空间: {len(grid)} 组参数组合")
 
     best_params, best_return, best_trades = strategy.optimize(df, grid)
     final_value, _, days = strategy.backtest(df, best_params)
     metrics = strategy.calc_metrics(final_value, best_trades, days)
 
+    lo = float(df['low'].min())
+    hi = float(df['high'].max())
+    p50 = float(df['close'].median())
+    step = 0.01 if p50 <= 10 else (0.05 if p50 <= 100 else 0.1)
+
+    complete = [t for t in best_trades if 'sell_date' in t]
+    hd = [(t['sell_date'] - t['buy_date']).days for t in complete] if complete else []
+    pro = [t.get('profit', 0) for t in complete]
+    avg_profit = sum(pro) / len(pro) if pro else 0
+
+    record = {
+        'code': code,
+        'name': config.STOCK_NAME,
+        'ts_code': config.TS_CODE,
+        'B': best_params['B'],
+        'S': best_params['S'],
+        'spread_pct': round((best_params['S'] - best_params['B']) / best_params['B'] * 100, 1),
+        'return': round(metrics['total_return'], 2),
+        'annual': round(metrics['annual_return'], 0),
+        'final_value': round(metrics['final_value'], 2),
+        'trades': metrics['trade_count'],
+        'win_rate': round(metrics['win_rate'], 0),
+        'avg_hold': round(metrics['avg_hold_days'], 1),
+        'max_hold': max(hd) if hd else 0,
+        'avg_profit': round(avg_profit),
+        'price_min': lo,
+        'price_max': hi,
+        'price_median': p50,
+        'rows': len(df),
+        'combos': len(grid),
+        'step': step,
+        'raw_trades': best_trades,
+        'param_desc': strategy.describe_params(best_params),
+        'param_grid_info': {
+            'window_lo': round(lo, 2),
+            'window_hi': round(hi * 1.05, 2),
+            'step': step,
+            'combinations': len(grid),
+        },
+    }
+    return record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params
+
+
+def cmd_backtest(args):
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
+        sys.exit(1)
+
+    fetcher = DataFetcher(token)
+    record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+        _run_backtest(args.code, args, fetcher)
+
     print(f"\n{'=' * 60}")
-    print("最优参数")
+    print(f"{config.STOCK_CODE} {config.STOCK_NAME} — {args.strategy} 回测")
     print(f"{'=' * 60}")
-    print(f"  {strategy.describe_params(best_params)}")
-    print(f"  收益率: {metrics['total_return']:.2f}%")
-    print(f"  年化: {metrics['annual_return']:.0f}%")
-    print(f"  交易: {metrics['trade_count']} 轮")
-    print(f"  胜率: {metrics['win_rate']:.0f}%")
-    print(f"  均持: {metrics['avg_hold_days']:.1f} 天")
+    print(f"\n数据: {len(df)} 条, {df.index[0].strftime('%Y-%m-%d')} ~ {df.index[-1].strftime('%Y-%m-%d')}")
+    print(f"价格: {lo:.2f} ~ {hi:.2f}, 中位: {p50:.2f}, 步长: {step}")
+    print(f"搜索空间: {len(grid)} 组")
+    print(f"\n最优参数: {strategy.describe_params(best_params)}")
+    print(f"收益率: {metrics['total_return']:.2f}%, 年化: {metrics['annual_return']:.0f}%")
+    print(f"交易: {metrics['trade_count']} 轮, 胜率: {metrics['win_rate']:.0f}%, 均持: {metrics['avg_hold_days']:.1f} 天")
 
     if not args.no_report:
         output_dir = os.path.join(
@@ -91,45 +117,20 @@ def cmd_backtest(args):
             'stocks', _stock_subdir(args.code), args.code, 'reports',
         )
         report = ReportGenerator(output_dir)
-
-        lo = float(df['low'].min())
-        hi = float(df['high'].max())
-        p50 = float(df['close'].median())
-        step = 0.01 if p50 <= 10 else (0.05 if p50 <= 100 else 0.1)
-
         report.generate_backtest_report(
             stock_code=config.STOCK_CODE,
             stock_name=config.STOCK_NAME,
             strategy_name=args.strategy,
             params=best_params,
             param_desc=strategy.describe_params(best_params),
-            param_grid_info={
-                'window_lo': round(lo, 2),
-                'window_hi': round(hi * 1.05, 2),
-                'step': step,
-                'combinations': len(grid),
-            },
+            param_grid_info=record['param_grid_info'],
             result=metrics,
             trades=best_trades,
             pricing_model_desc='限价条件单',
-            start_date=start,
-            end_date=end,
+            start_date=args.start,
+            end_date=args.end,
             trading_days=len(df),
         )
-
-    summary_trades = best_trades[:10] if len(best_trades) > 10 else best_trades
-    complete = [t for t in summary_trades if 'sell_date' in t]
-    if complete:
-        print(f"\n前 {len(complete)} 轮交易明细:")
-        for t in complete:
-            bd = t['buy_date'].strftime('%Y-%m-%d')
-            sd = t['sell_date'].strftime('%Y-%m-%d')
-            hd = (t['sell_date'] - t['buy_date']).days
-            print(
-                f"  {bd} ~ {sd}  "
-                f"{hd}天  "
-                f"¥{t.get('profit', 0):+,.0f}"
-            )
 
 
 def cmd_compare(args):
@@ -201,6 +202,121 @@ def cmd_compare(args):
     )
 
 
+def cmd_batch(args):
+    """批量回测多只股票，生成个股报告 + 综合对比报告。所有回测逻辑复用 _run_backtest。"""
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
+        sys.exit(1)
+
+    fetcher = DataFetcher(token)
+    codes = [c.strip() for c in args.codes.split(',')]
+
+    import json
+
+    class Enc(json.JSONEncoder):
+        def default(self, o):
+            return o.strftime('%Y-%m-%d') if hasattr(o, 'strftime') else super().default(o)
+
+    results = []
+    for code in codes:
+        print(f"\n{'#' * 60}")
+        print(f"# {code}")
+        print(f"{'#' * 60}")
+        try:
+            record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+                _run_backtest(code, args, fetcher)
+
+            print(f"  数据: {len(df)} 条, {lo:.2f}~{hi:.2f}, 中位={p50:.2f}, 步长={step}")
+            print(f"  搜索: {len(grid)} 组")
+            print(f"  最优: B={best_params['B']:.2f} S={best_params['S']:.2f} "
+                  f"收益率={metrics['total_return']:.2f}% {metrics['trade_count']}轮")
+
+            if not args.no_report:
+                output_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    'stocks', _stock_subdir(code), code, 'reports',
+                )
+                report = ReportGenerator(output_dir)
+                report.generate_backtest_report(
+                    stock_code=config.STOCK_CODE,
+                    stock_name=config.STOCK_NAME,
+                    strategy_name=args.strategy,
+                    params=best_params,
+                    param_desc=strategy.describe_params(best_params),
+                    param_grid_info=record['param_grid_info'],
+                    result=metrics,
+                    trades=best_trades,
+                    pricing_model_desc='限价条件单',
+                    start_date=args.start,
+                    end_date=args.end,
+                    trading_days=len(df),
+                )
+
+            results.append(record)
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    if len(results) < 2:
+        return
+
+    sr = sorted(results, key=lambda x: x['return'], reverse=True)
+    good = [r for r in sr if r['trades'] >= 4 and r['return'] > 20]
+    ok = [r for r in sr if 2 <= r['trades'] < 4 and r['return'] > 10]
+    bad = [r for r in sr if r['trades'] < 2 or r['return'] <= 10]
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      'stocks', f'网格策略对比_批量_{today}.md')
+    lines = [f"# 网格策略对比 — 批量回测\n",
+             f"> {args.start} ~ {args.end} | 本金{args.cash:,.0f} | 佣金{args.commission:.1%} | 固定不复利\n",
+             "---\n## 一、综合排名\n",
+             "| # | 代码 | 名称 | B(元) | S(元) | 价差% | 收益率 | 年化 | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 箱体(元) | 步长(元) |",
+             "|---|------|------|------:|------:|------:|------:|-----:|--------:|-----:|--------:|--------:|--------:|---------|--------:|"]
+    for i, r in enumerate(sr):
+        lines.append(f"| {i+1} | {r['code']} | {r['name']} | "
+                     f"{r['B']:.2f} | {r['S']:.2f} | {r['spread_pct']:.1f}% | "
+                     f"**{r['return']:.2f}%** | ~{r['annual']:.0f}% | "
+                     f"{r['trades']} | {r['win_rate']:.0f}% | "
+                     f"{r['avg_hold']:.1f} | {r['max_hold']} | {r['avg_profit']:,.0f} | "
+                     f"{r['price_min']:.2f}~{r['price_max']:.2f} | {r['step']} |")
+    lines.append("")
+    lines.append("---\n## 二、分类评估\n")
+    lines.append(f"| 评级 | 数量 | 标的 |")
+    lines.append(f"|------|------|------|")
+    lines.append(f"| ✅ 合格(≥4轮) | {len(good)} | {', '.join(r['name'] for r in good) if good else '—'} |")
+    lines.append(f"| ⚠️ 观察 | {len(ok)} | {', '.join(r['name'] for r in ok) if ok else '—'} |")
+    lines.append(f"| ❌ 不适合 | {len(bad)} | {', '.join(r['name'] for r in bad) if bad else '—'} |")
+    lines.append("")
+
+    from datetime import date as date_cls
+    for i, r in enumerate(sr):
+        tag = '✅' if r in good else ('⚠️' if r in ok else '❌')
+        lines.append(f"### {i+1}. {r['code']} {r['name']} {tag}\n")
+        lines.append(f"B={r['B']:.2f} S={r['S']:.2f}（{r['spread_pct']:.1f}%）| "
+                     f"{r['return']:.2f}% | {r['trades']}轮 | 均持{r['avg_hold']:.1f}天 | 步长{r['step']}\n")
+        comp = [t for t in r['raw_trades'] if 'sell_date' in t]
+        if not comp:
+            lines.append("*无交易*\n")
+            continue
+        lines.append("| # | 买入日 | B(元) | 卖出日 | S(元) | 持仓(天) | 盈亏(元) |")
+        lines.append("|---|------|------:|------|------:|--------:|--------:|")
+        for idx, t in enumerate(comp):
+            bd = t['buy_date'].strftime('%Y-%m-%d') if hasattr(t['buy_date'], 'strftime') else t['buy_date'][:10]
+            sd = t['sell_date'].strftime('%Y-%m-%d') if hasattr(t['sell_date'], 'strftime') else t['sell_date'][:10]
+            try: hd = (date_cls.fromisoformat(sd) - date_cls.fromisoformat(bd)).days
+            except: hd = 0
+            lines.append(f"| {idx+1} | {bd} | {t['buy_price']:.2f} | "
+                         f"{sd} | {t['sell_price']:.2f} | {hd} | {t.get('profit', 0):+,.0f} |")
+        lines.append("")
+
+    lines.append("---\n## 风险提示\n仅供研究参考，不构成投资建议。")
+    with open(fp, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f"\n综合报告: {fp}")
+    print(f"✅{len(good)} ⚠️{len(ok)} ❌{len(bad)}")
+
+
 def cmd_daemon(args):
     token = os.getenv('TUSHARE_TOKEN')
     if not token:
@@ -268,6 +384,16 @@ def main():
     bt.add_argument('--commission', type=float, default=0.001, help='佣金率')
     bt.add_argument('--no-report', action='store_true', help='不生成报告')
     bt.set_defaults(func=cmd_backtest)
+
+    ba = sub.add_parser('batch', help='批量回测 + 生成综合对比报告')
+    ba.add_argument('--codes', required=True, help='股票代码，逗号分隔，如 "601128,601139,600572"')
+    ba.add_argument('--strategy', default='GridThresholdStrategy', help='策略类名')
+    ba.add_argument('--start', default='2024-06-01', help='开始日期 (YYYY-MM-DD)')
+    ba.add_argument('--end', default='2026-05-16', help='结束日期 (YYYY-MM-DD)')
+    ba.add_argument('--cash', type=float, default=100000, help='初始本金')
+    ba.add_argument('--commission', type=float, default=0.001, help='佣金率')
+    ba.add_argument('--no-report', action='store_true', help='不生成个股报告')
+    ba.set_defaults(func=cmd_batch)
 
     cp = sub.add_parser('compare', help='多参数对比')
     cp.add_argument('--code', default='000727', help='股票代码')
