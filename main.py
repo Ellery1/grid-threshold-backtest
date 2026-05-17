@@ -63,6 +63,16 @@ def _get_stock_industry(code):
     return ''
 
 
+def _import_stock(code):
+    """导入股票模块（仅用于单线程场景：grid-report/daemon）"""
+    for sub in SUBDIRS:
+        try:
+            return __import__(f'stocks.{sub}.{code}', fromlist=['strategy', 'config'])
+        except ModuleNotFoundError:
+            continue
+    raise ModuleNotFoundError(f"股票 {code} 不在 qualified/disqualified/candidates 中")
+
+
 def _stock_subdir(code):
     for sub in SUBDIRS:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', sub, code)
@@ -159,7 +169,7 @@ def _run_backtest(code, args, fetcher):
             'combinations': len(grid),
         },
     }
-    return record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params
+    return record, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params
 
 
 def cmd_backtest(args):
@@ -170,11 +180,11 @@ def cmd_backtest(args):
 
     ts.set_token(token)
     fetcher = DataFetcher()
-    record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+    record, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
         _run_backtest(args.code, args, fetcher)
 
     print(f"\n{'=' * 60}")
-    print(f"{config.STOCK_CODE} {config.STOCK_NAME} — {args.strategy} 回测")
+    print(f"{record['code']} {record['name']} — {args.strategy} 回测")
     print(f"{'=' * 60}")
     print(f"\n数据: {len(df)} 条, {df.index[0].strftime('%Y-%m-%d')} ~ {df.index[-1].strftime('%Y-%m-%d')}")
     print(f"价格: {lo:.2f} ~ {hi:.2f}, 中位: {p50:.2f}, 步长: {step}")
@@ -190,8 +200,8 @@ def cmd_backtest(args):
         )
         report = ReportGenerator(output_dir)
         report.generate_backtest_report(
-            stock_code=config.STOCK_CODE,
-            stock_name=config.STOCK_NAME,
+            stock_code=record['code'],
+            stock_name=record['name'],
             strategy_name=args.strategy,
             params=best_params,
             param_desc=strategy.describe_params(best_params),
@@ -498,9 +508,9 @@ def cmd_batch(args):
         print(f"\n{'#' * 60}")
         print(f"# {code}")
         print(f"{'#' * 60}")
-        _ensure_stock_dir(code, fetcher, args.start, args.end)
+        _ensure_stock_dir(code, args.start, args.end)
         try:
-            record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+            record, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
                 _run_backtest(code, args, fetcher)
 
             print(f"  数据: {len(df)} 条, {lo:.2f}~{hi:.2f}, 中位={p50:.2f}, 步长={step}")
@@ -515,8 +525,8 @@ def cmd_batch(args):
                 )
                 report = ReportGenerator(output_dir)
                 report.generate_backtest_report(
-                    stock_code=config.STOCK_CODE,
-                    stock_name=config.STOCK_NAME,
+                    stock_code=record['code'],
+                    stock_name=record['name'],
                     strategy_name=args.strategy,
                     params=best_params,
                     param_desc=strategy.describe_params(best_params),
