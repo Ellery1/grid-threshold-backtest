@@ -33,7 +33,7 @@ class GridThresholdStrategy(BaseStrategy):
             window_hi = round(hi, 2)
             rng = np.round(np.arange(window_lo, window_hi + step, step), 2)
             total = len(rng) * (len(rng) - 1) // 2
-            if total <= 50000:
+            if total <= 20000:
                 break
             step_idx += 1
 
@@ -153,7 +153,7 @@ class GridThresholdStrategy(BaseStrategy):
         if holding:
             final_value = cash + shares * float(df.iloc[-1]['close'])
         else:
-            final_value = cash + total_profit
+            final_value = cash
 
         days = (df.index[-1] - df.index[0]).days
         return final_value, trades, days
