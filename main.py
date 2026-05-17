@@ -288,7 +288,16 @@ def _run_all_batches(args):
         content = f.read()
 
     codes = []
+    in_candidates = False
     for line in content.split('\n'):
+        if '全量候选清单' in line:
+            in_candidates = True
+            continue
+        if '谨慎清单' in line:
+            in_candidates = False
+            continue
+        if not in_candidates:
+            continue
         if '🔲' in line and line.strip().startswith('|'):
             parts = [p.strip() for p in line.split('|')]
             if len(parts) >= 4:
