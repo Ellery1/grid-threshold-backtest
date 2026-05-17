@@ -396,7 +396,7 @@ def _run_single_batch(args):
         try:
             time.sleep(random.uniform(0.1, 0.8))
             fetcher = DataFetcher()
-            record, best_params, metrics, best_trades, lo, hi, p50, step, strategy, df, grid = \
+            record, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
                 _run_backtest(code, args, fetcher)
             with _print_lock:
                 print(f"  {_ts()} [{code}] {len(df)}条 step={step} "
