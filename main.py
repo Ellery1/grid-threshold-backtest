@@ -308,7 +308,7 @@ def _run_all_batches(args):
 
     reports_dir = os.path.join(root, 'stocks')
     existing = [f for f in os.listdir(reports_dir) if f.startswith('网格策略对比_第')]
-    max_batch = 2
+    max_batch = 0
     for f in existing:
         m = re.search(r'第(\d+)批', f)
         if m:
