@@ -318,6 +318,7 @@ def _run_all_batches(args):
         if m:
             max_batch = max(max_batch, int(m.group(1)))
     start_batch = max_batch + 1
+    all_failed = []
 
     for batch_idx, batch_codes in enumerate(batches):
         batch_num = start_batch + batch_idx
@@ -328,11 +329,29 @@ def _run_all_batches(args):
         print(f"{_ts()} 批次 {batch_num}/{start_batch + len(batches) - 1}  ({len(batch_codes)}只)")
         print(f"{_ts()} {'=' * 60}\n")
 
+        failed = []
         try:
-            _run_single_batch(args)
+            failed = _run_single_batch(args) or []
         except Exception as e:
-            print(f"批次 {batch_num} 出错: {e}")
-            continue
+            print(f"{_ts()} 批次 {batch_num} 崩溃: {e}")
+        all_failed.extend(failed)
+
+    if all_failed:
+        print(f"\n{_ts()} {'=' * 60}")
+        print(f"{_ts()} 补偿轮: {len(all_failed)} 只失败股票单独重试")
+        print(f"{_ts()} {'=' * 60}\n")
+        retry_batch = start_batch + len(batches)
+        args.codes = ','.join(all_failed)
+        args.batch = retry_batch
+        try:
+            still_failed = _run_single_batch(args) or []
+            if still_failed:
+                print(f"\n{_ts()} ❌ 补偿后仍失败 {len(still_failed)} 只: {', '.join(still_failed)}")
+            else:
+                print(f"\n{_ts()} ✅ 补偿轮全部成功")
+        except Exception as e:
+            print(f"{_ts()} 补偿轮崩溃: {e}")
+            print(f"{_ts()} ❌ 最终失败: {', '.join(all_failed)}")
 
     print(f"\n{_ts()} 全部 {len(batches)} 批完成。")
 
@@ -353,23 +372,36 @@ def _run_single_batch(args):
 
     # 第二阶段：并行回测
     results = []
+    failed_codes = []
     _print_lock = threading.Lock()
 
     def _backtest_one(code):
-        fetcher = DataFetcher(token)
-        record, best_params, metrics, best_trades, lo, hi, p50, step, strategy, df, grid = \
-            _run_backtest(code, args, fetcher)
-        with _print_lock:
-            print(f"  {_ts()} [{code}] {len(df)}条 step={step} "
-                  f"B={best_params['B']:.2f} S={best_params['S']:.2f} "
-                  f"ret={metrics['total_return']:.2f}% {metrics['trade_count']}t",
-                  flush=True)
-        return record
+        try:
+            fetcher = DataFetcher(token)
+            record, best_params, metrics, best_trades, lo, hi, p50, step, strategy, df, grid = \
+                _run_backtest(code, args, fetcher)
+            with _print_lock:
+                print(f"  {_ts()} [{code}] {len(df)}条 step={step} "
+                      f"B={best_params['B']:.2f} S={best_params['S']:.2f} "
+                      f"ret={metrics['total_return']:.2f}% {metrics['trade_count']}t",
+                      flush=True)
+            return ('ok', record)
+        except Exception as e:
+            with _print_lock:
+                print(f"  {_ts()} [{code}] **失败**: {e}", flush=True)
+            return ('fail', code)
 
     with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as ex:
         futures = {ex.submit(_backtest_one, c): c for c in codes}
         for fut in as_completed(futures):
-            results.append(fut.result())
+            status, payload = fut.result()
+            if status == 'ok':
+                results.append(payload)
+            else:
+                failed_codes.append(payload)
+
+    if failed_codes:
+        print(f"\n{_ts()} ⚠️ 本批失败 {len(failed_codes)} 只: {', '.join(failed_codes)}")
 
     sr = sorted(results, key=lambda x: x['return'], reverse=True)
     good = [r for r in sr if r['trades'] >= 4 and r['return'] > 20]
@@ -428,6 +460,7 @@ def _run_single_batch(args):
             print(f"{_ts()} 迁移: {r['code']} → disqualified (观察)")
 
     _update_comparison_doc(results, args.batch, good, ok, bad)
+    return failed_codes
 
 
 def cmd_batch(args):
@@ -585,7 +618,10 @@ def _update_comparison_doc(results, batch, good, ok, bad):
 
     insert_pos = None
     for i, line in enumerate(lines):
-        if line.strip().startswith('|') and line.strip().count('|') >= 10:
+        s = line.strip()
+        if s.startswith('|---:') or s.startswith('|:---:'):
+            insert_pos = i + 1
+        elif s.startswith('|') and s.count('|') >= 8 and s[2:3].isdigit():
             insert_pos = i + 1
 
     if insert_pos is None:
@@ -596,7 +632,7 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
 
     new_rows = []
-    for idx, r in enumerate(sr):
+    for r in sr:
         name = _get_stock_name(r['code'])
         ind = _get_stock_industry(r['code'])
         spread = r.get('spread_pct', round((r['S'] - r['B']) / r['B'] * 100, 1))
@@ -614,9 +650,18 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     for row in reversed(new_rows):
         lines.insert(insert_pos, row)
 
+    passed = sum(1 for line in lines[insert_pos:insert_pos+len(new_rows)] if '✅' in line)
+    total_data = sum(1 for line in lines if line.strip().startswith('|') and line.strip().count('|') >= 8)
+
+    for i, line in enumerate(lines):
+        if '总计已回测' in line:
+            lines[i] = f'- 总计已回测：**{total_data}** 只'
+        if '合格可实盘' in line and '✅' in line:
+            lines[i] = f'- ✅ 合格可实盘：**{passed}** 只'
+
     with open(cmp, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
-    print(f"  横向对比文档已更新: {cmp}")
+    print(f"  {_ts()} 横向对比已更新")
 
 
 def cmd_daemon(args):
