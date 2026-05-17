@@ -3,6 +3,8 @@ import sys
 import re
 import time
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -59,15 +61,6 @@ def _get_stock_industry(code):
     return ''
 
 
-def _import_stock(code):
-    for sub in SUBDIRS:
-        try:
-            return __import__(f'stocks.{sub}.{code}', fromlist=['strategy', 'config'])
-        except ModuleNotFoundError:
-            continue
-    raise ModuleNotFoundError(f"股票 {code} 不在 qualified/disqualified/candidates 中")
-
-
 def _stock_subdir(code):
     for sub in SUBDIRS:
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', sub, code)
@@ -76,8 +69,8 @@ def _stock_subdir(code):
     return 'candidates'
 
 
-def _ensure_stock_dir(code, fetcher, start, end):
-    """创建股票目录（若不存在则放在 candidates/ 下）"""
+def _ensure_stock_dir(code, start, end):
+    """创建股票配置目录（若不存在则放在 candidates/ 下）"""
     for sub in SUBDIRS:
         d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks', sub, code)
         if os.path.isdir(d):
@@ -97,15 +90,17 @@ def _ensure_stock_dir(code, fetcher, start, end):
 
 
 def _run_backtest(code, args, fetcher):
-    strategy_module = _import_stock(code)
-    config = strategy_module.config
-    strategy_cls = getattr(strategy_module.strategy, args.strategy)
+    """回测单只股票（线程安全，不依赖 importlib）"""
+    from stocks.grid_strategy import GridThresholdStrategy
 
-    df = fetcher.fetch(config.TS_CODE, args.start, args.end)
+    ts_code = f'{code}.SH' if code.startswith(('6', '9')) else f'{code}.SZ'
+    name = _get_stock_name(code)
 
-    strategy = strategy_cls(
-        stock_code=config.STOCK_CODE,
-        stock_name=config.STOCK_NAME,
+    df = fetcher.fetch(ts_code, args.start, args.end)
+
+    strategy = GridThresholdStrategy(
+        stock_code=code,
+        stock_name=name,
         init_cash=args.cash,
         commission=args.commission,
     )
@@ -134,8 +129,8 @@ def _run_backtest(code, args, fetcher):
 
     record = {
         'code': code,
-        'name': config.STOCK_NAME,
-        'ts_code': config.TS_CODE,
+        'name': name,
+        'ts_code': ts_code,
         'B': best_params['B'],
         'S': best_params['S'],
         'spread_pct': round((best_params['S'] - best_params['B']) / best_params['B'] * 100, 1),
@@ -343,39 +338,38 @@ def _run_all_batches(args):
 
 
 def _run_single_batch(args):
-    """单批次回测，提取自原 cmd_batch 的核心逻辑。"""
+    """单批次回测（多线程并行）"""
     token = os.getenv('TUSHARE_TOKEN')
     if not token:
         print("错误: 未设置 TUSHARE_TOKEN")
         sys.exit(1)
 
-    fetcher = DataFetcher(token)
     codes = [c.strip() for c in args.codes.split(',')]
 
-    import json, shutil
-
-    results = []
+    # 第一阶段：创建目录（单线程，避免竞态）
     for code in codes:
-        print(f"\n{_ts()} [{code}]")
-        _ensure_stock_dir(code, fetcher, args.start, args.end)
-        record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+        _ensure_stock_dir(code, args.start, args.end)
+        print(f"  {_ts()} [{code}] 目录准备")
+
+    # 第二阶段：并行回测
+    results = []
+    _print_lock = threading.Lock()
+
+    def _backtest_one(code):
+        fetcher = DataFetcher(token)
+        record, best_params, metrics, best_trades, lo, hi, p50, step, strategy, df, grid = \
             _run_backtest(code, args, fetcher)
+        with _print_lock:
+            print(f"  {_ts()} [{code}] {len(df)}条 step={step} "
+                  f"B={best_params['B']:.2f} S={best_params['S']:.2f} "
+                  f"ret={metrics['total_return']:.2f}% {metrics['trade_count']}t",
+                  flush=True)
+        return record
 
-        print(f"  {_ts()} {len(df)}条 step={step} B={best_params['B']:.2f} S={best_params['S']:.2f} "
-              f"ret={metrics['total_return']:.2f}% {metrics['trade_count']}t")
-
-        if not args.no_report:
-            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      'stocks', _stock_subdir(code), code, 'reports')
-            ReportGenerator(output_dir).generate_backtest_report(
-                stock_code=config.STOCK_CODE, stock_name=config.STOCK_NAME,
-                strategy_name=args.strategy, params=best_params,
-                param_desc=strategy.describe_params(best_params),
-                param_grid_info=record['param_grid_info'],
-                result=metrics, trades=best_trades,
-                pricing_model_desc='限价条件单',
-                start_date=args.start, end_date=args.end, trading_days=len(df))
-        results.append(record)
+    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as ex:
+        futures = {ex.submit(_backtest_one, c): c for c in codes}
+        for fut in as_completed(futures):
+            results.append(fut.result())
 
     sr = sorted(results, key=lambda x: x['return'], reverse=True)
     good = [r for r in sr if r['trades'] >= 4 and r['return'] > 20]
@@ -412,6 +406,7 @@ def _run_single_batch(args):
     print(f"\n{_ts()} 报告: {os.path.basename(fp)}")
     print(f"{_ts()} ✅{len(good)} ⚠️{len(ok)} ❌{len(bad)}")
 
+    import shutil
     base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks')
     for r in good:
         src = os.path.join(base, 'candidates', r['code'])
