@@ -581,7 +581,7 @@ def _update_comparison_doc(results, batch, good, ok, bad):
 
     insert_pos = None
     for i, line in enumerate(lines):
-        if line.strip().startswith('|') and '✅' in line and '|' in line:
+        if line.strip().startswith('|') and line.strip().count('|') >= 10:
             insert_pos = i + 1
 
     if insert_pos is None:
@@ -595,10 +595,17 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     for idx, r in enumerate(sr):
         name = _get_stock_name(r['code'])
         ind = _get_stock_industry(r['code'])
+        spread = r.get('spread_pct', round((r['S'] - r['B']) / r['B'] * 100, 1))
+        step_display = round(float(r['step']), 2) if r.get('step') else 0.01
         new_rows.append(
-            f"| {batch} | {idx+1} | {r['code']} | {name} | {ind} | "
-            f"{r['B']:.2f} | {r['S']:.2f} | {r['return']:.2f}% | "
-            f"{ann_s(r)} | {r['trades']} | {r['step']} | {tag(r)} |")
+            f"| {batch} | {r['code']} | {name} | {ind} | "
+            f"{r['B']:.2f} | {r['S']:.2f} | "
+            f"{spread:.1f}% | "
+            f"**{r['return']:.2f}%** | "
+            f"{ann_s(r)} | "
+            f"{r['trades']} | "
+            f"{step_display} | "
+            f"{tag(r)} |")
 
     for row in reversed(new_rows):
         lines.insert(insert_pos, row)
