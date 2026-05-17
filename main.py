@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import time
+import random
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -377,6 +378,7 @@ def _run_single_batch(args):
 
     def _backtest_one(code):
         try:
+            time.sleep(random.uniform(0.1, 0.8))
             fetcher = DataFetcher(token)
             record, best_params, metrics, best_trades, lo, hi, p50, step, strategy, df, grid = \
                 _run_backtest(code, args, fetcher)
@@ -391,7 +393,7 @@ def _run_single_batch(args):
                 print(f"  {_ts()} [{code}] **失败**: {e}", flush=True)
             return ('fail', code)
 
-    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futures = {ex.submit(_backtest_one, c): c for c in codes}
         for fut in as_completed(futures):
             status, payload = fut.result()
