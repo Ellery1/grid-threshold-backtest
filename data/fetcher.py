@@ -5,8 +5,7 @@ import tushare as ts
 
 
 class DataFetcher:
-    def __init__(self, token: str):
-        ts.set_token(token)
+    def __init__(self):
         self._pro = ts.pro_api()
 
     def fetch(

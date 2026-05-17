@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from data.fetcher import DataFetcher
+import tushare as ts
 from stocks.base import BaseStrategy
 from reports.generator import ReportGenerator
 
@@ -167,7 +168,8 @@ def cmd_backtest(args):
         print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
         sys.exit(1)
 
-    fetcher = DataFetcher(token)
+    ts.set_token(token)
+    fetcher = DataFetcher()
     record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
         _run_backtest(args.code, args, fetcher)
 
@@ -209,7 +211,9 @@ def cmd_compare(args):
         print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
         sys.exit(1)
 
-    fetcher = DataFetcher(token)
+    ts.set_token(token)
+
+    fetcher = DataFetcher()
     today = datetime.now().strftime('%Y-%m-%d')
 
     start = args.start or '2025-01-01'
@@ -364,6 +368,8 @@ def _run_single_batch(args):
         print("错误: 未设置 TUSHARE_TOKEN")
         sys.exit(1)
 
+    ts.set_token(token)
+
     codes = [c.strip() for c in args.codes.split(',')]
 
     # 第一阶段：创建目录（单线程，避免竞态）
@@ -379,7 +385,7 @@ def _run_single_batch(args):
     def _backtest_one(code):
         try:
             time.sleep(random.uniform(0.1, 0.8))
-            fetcher = DataFetcher(token)
+            fetcher = DataFetcher()
             record, best_params, metrics, best_trades, lo, hi, p50, step, strategy, df, grid = \
                 _run_backtest(code, args, fetcher)
             with _print_lock:
@@ -476,7 +482,9 @@ def cmd_batch(args):
         print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
         sys.exit(1)
 
-    fetcher = DataFetcher(token)
+    ts.set_token(token)
+
+    fetcher = DataFetcher()
     codes = [c.strip() for c in args.codes.split(',')]
 
     import json
@@ -683,7 +691,8 @@ def cmd_daemon(args):
         print("错误: config/email.py 不存在，请复制 config/email.example.py 并填写配置")
         sys.exit(1)
 
-    fetcher = DataFetcher(token)
+    ts.set_token(token)
+    fetcher = DataFetcher()
     mailer = Mailer(EmailConfig)
 
     stocks_config = []
