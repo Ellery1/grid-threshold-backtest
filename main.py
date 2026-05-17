@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+import time
 import argparse
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -11,7 +13,50 @@ from stocks.base import BaseStrategy
 from reports.generator import ReportGenerator
 
 
+def _ts():
+    return time.strftime('%H:%M:%S')
+
+
 SUBDIRS = ['qualified', 'disqualified', 'candidates']
+_cached_names = {}
+
+def _get_stock_name(code):
+    if code in _cached_names:
+        return _cached_names[code]
+    root = os.path.dirname(os.path.abspath(__file__))
+    md = os.path.join(root, 'A类股_网格搜索_原始个股名录.md')
+    try:
+        with open(md, encoding='utf-8') as f:
+            for line in f:
+                if code in line and line.strip().startswith('|'):
+                    parts = [p.strip() for p in line.split('|')]
+                    if len(parts) >= 4 and parts[2] == code:
+                        _cached_names[code] = parts[3]
+                        return parts[3]
+    except Exception:
+        pass
+    _cached_names[code] = code
+    return code
+
+_cached_industries = {}
+
+def _get_stock_industry(code):
+    if code in _cached_industries:
+        return _cached_industries[code]
+    root = os.path.dirname(os.path.abspath(__file__))
+    md = os.path.join(root, 'A类股_网格搜索_原始个股名录.md')
+    try:
+        with open(md, encoding='utf-8') as f:
+            for line in f:
+                if code in line and line.strip().startswith('|'):
+                    parts = [p.strip() for p in line.split('|')]
+                    if len(parts) >= 5 and parts[2] == code:
+                        _cached_industries[code] = parts[4]
+                        return parts[4]
+    except Exception:
+        pass
+    _cached_industries[code] = ''
+    return ''
 
 
 def _import_stock(code):
@@ -43,8 +88,9 @@ def _ensure_stock_dir(code, fetcher, start, end):
     with open(os.path.join(d, 'strategy.py'), 'w', encoding='utf-8') as f:
         f.write('from stocks.grid_strategy import GridThresholdStrategy\n')
     ts_code = f'{code}.SH' if code.startswith(('6', '9')) else f'{code}.SZ'
+    name = _get_stock_name(code)
     with open(os.path.join(d, 'config.py'), 'w', encoding='utf-8') as f:
-        f.write(f'STOCK_CODE="{code}"\nSTOCK_NAME="X"\nTS_CODE="{ts_code}"\n'
+        f.write(f'STOCK_CODE="{code}"\nSTOCK_NAME="{name}"\nTS_CODE="{ts_code}"\n'
                 f'INIT_CASH=100000\nCOMMISSION=0.001\n'
                 f'BACKTEST_START="{start}"\nBACKTEST_END="{end}"\n'
                 f'BEST_BUY=None\nBEST_SELL=None\n')
@@ -73,7 +119,13 @@ def _run_backtest(code, args, fetcher):
     lo = float(df['low'].min())
     hi = float(df['high'].max())
     p50 = float(df['close'].median())
-    step = 0.01 if p50 <= 5 else (0.02 if p50 <= 10 else (0.1 if p50 <= 50 else (0.5 if p50 <= 100 else 1)))
+
+    step = grid[1]['B'] - grid[0]['B'] if len(grid) > 1 else 0.01
+    if step == 0:
+        for i in range(1, len(grid)):
+            if grid[i]['B'] != grid[0]['B']:
+                step = grid[i]['B'] - grid[0]['B']
+                break
 
     complete = [t for t in best_trades if 'sell_date' in t]
     hd = [(t['sell_date'] - t['buy_date']).days for t in complete] if complete else []
@@ -224,8 +276,162 @@ def cmd_compare(args):
     )
 
 
+def _run_all_batches(args):
+    """从 A类股_网格搜索_原始个股名录.md 读取所有待回测股票，分批回测。"""
+    root = os.path.dirname(os.path.abspath(__file__))
+    candidates_md = os.path.join(root, 'A类股_网格搜索_原始个股名录.md')
+    if not os.path.exists(candidates_md):
+        print(f"错误: 找不到 {candidates_md}")
+        sys.exit(1)
+
+    with open(candidates_md, encoding='utf-8') as f:
+        content = f.read()
+
+    codes = []
+    for line in content.split('\n'):
+        if '🔲' in line and line.strip().startswith('|'):
+            parts = [p.strip() for p in line.split('|')]
+            if len(parts) >= 4:
+                code = parts[2]
+                if code.isdigit() and len(code) == 6:
+                    codes.append(code)
+
+    # Filter out already processed stocks
+    codes = [c for c in codes if _stock_subdir(c) == 'candidates']
+
+    if not codes:
+        print(f"{_ts()} 没有待回测股票（全部已完成！）")
+        return
+
+    batches = [codes[i:i + 10] for i in range(0, len(codes), 10)]
+    print(f"{_ts()} 全部待回测: {len(codes)} 只, 共 {len(batches)} 批\n")
+
+    reports_dir = os.path.join(root, 'stocks')
+    existing = [f for f in os.listdir(reports_dir) if f.startswith('网格策略对比_第')]
+    max_batch = 2
+    for f in existing:
+        m = re.search(r'第(\d+)批', f)
+        if m:
+            max_batch = max(max_batch, int(m.group(1)))
+    start_batch = max_batch + 1
+
+    for batch_idx, batch_codes in enumerate(batches):
+        batch_num = start_batch + batch_idx
+        args.codes = ','.join(batch_codes)
+        args.batch = batch_num
+
+        print(f"\n{_ts()} {'=' * 60}")
+        print(f"{_ts()} 批次 {batch_num}/{start_batch + len(batches) - 1}  ({len(batch_codes)}只)")
+        print(f"{_ts()} {'=' * 60}\n")
+
+        try:
+            _run_single_batch(args)
+        except Exception as e:
+            print(f"批次 {batch_num} 出错: {e}")
+            continue
+
+    print(f"\n{_ts()} 全部 {len(batches)} 批完成。")
+
+
+def _run_single_batch(args):
+    """单批次回测，提取自原 cmd_batch 的核心逻辑。"""
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN")
+        sys.exit(1)
+
+    fetcher = DataFetcher(token)
+    codes = [c.strip() for c in args.codes.split(',')]
+
+    import json, shutil
+
+    results = []
+    for code in codes:
+        print(f"\n{_ts()} [{code}]")
+        _ensure_stock_dir(code, fetcher, args.start, args.end)
+        record, config, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+            _run_backtest(code, args, fetcher)
+
+        print(f"  {_ts()} {len(df)}条 step={step} B={best_params['B']:.2f} S={best_params['S']:.2f} "
+              f"ret={metrics['total_return']:.2f}% {metrics['trade_count']}t")
+
+        if not args.no_report:
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      'stocks', _stock_subdir(code), code, 'reports')
+            ReportGenerator(output_dir).generate_backtest_report(
+                stock_code=config.STOCK_CODE, stock_name=config.STOCK_NAME,
+                strategy_name=args.strategy, params=best_params,
+                param_desc=strategy.describe_params(best_params),
+                param_grid_info=record['param_grid_info'],
+                result=metrics, trades=best_trades,
+                pricing_model_desc='限价条件单',
+                start_date=args.start, end_date=args.end, trading_days=len(df))
+        results.append(record)
+
+    sr = sorted(results, key=lambda x: x['return'], reverse=True)
+    good = [r for r in sr if r['trades'] >= 4 and r['return'] > 20]
+    ok = [r for r in sr if 2 <= r['trades'] < 4 and r['return'] > 10]
+    bad = [r for r in sr if r['trades'] < 2 or r['return'] <= 10]
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      'stocks', f'网格策略对比_第{args.batch}批_{today}.md')
+    lines = [f"# 网格策略对比 — 第{args.batch}批\n",
+             f"> {args.start} ~ {args.end} | 本金{args.cash:,.0f} | 佣金{args.commission:.1%} | 固定不复利\n",
+             "---\n## 一、综合排名\n",
+             "| # | 代码 | 名称 | B(元) | S(元) | 价差% | 收益率 | 年化 | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 步长 | 组合数 |",
+             "|---|------|------|------:|------:|------:|------:|-----:|--------:|-----:|--------:|--------:|--------:|-----:|------:|"]
+    for i, r in enumerate(sr):
+        lines.append(f"| {i+1} | {r['code']} | {r['name']} | "
+                     f"{r['B']:.2f} | {r['S']:.2f} | {r['spread_pct']:.1f}% | "
+                     f"**{r['return']:.2f}%** | ~{r['annual']:.0f}% | "
+                     f"{r['trades']} | {r['win_rate']:.0f}% | "
+                     f"{r['avg_hold']:.1f} | {r['max_hold']} | {r['avg_profit']:,.0f} | "
+                     f"{r['step']} | {r['combos']} |")
+    lines.append("")
+    lines.append("---\n## 二、分类\n")
+    lines.append(f"| 评级 | 数量 | 标的 |")
+    lines.append(f"|------|------|------|")
+    lines.append(f"| ✅ 合格(≥4轮) | {len(good)} | {', '.join(r['name'] for r in good) if good else '—'} |")
+    lines.append(f"| ⚠️ 观察 | {len(ok)} | {', '.join(r['name'] for r in ok) if ok else '—'} |")
+    lines.append(f"| ❌ 不适合 | {len(bad)} | {', '.join(r['name'] for r in bad) if bad else '—'} |")
+    lines.append("")
+    lines.append("---\n## 风险提示\n仅供研究参考，不构成投资建议。")
+
+    with open(fp, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f"\n{_ts()} 报告: {os.path.basename(fp)}")
+    print(f"{_ts()} ✅{len(good)} ⚠️{len(ok)} ❌{len(bad)}")
+
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks')
+    for r in good:
+        src = os.path.join(base, 'candidates', r['code'])
+        dst = os.path.join(base, 'qualified', r['code'])
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.move(src, dst)
+            print(f"{_ts()} 迁移: {r['code']} → qualified")
+    for r in bad:
+        src = os.path.join(base, 'candidates', r['code'])
+        dst = os.path.join(base, 'disqualified', r['code'])
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.move(src, dst)
+            print(f"{_ts()} 迁移: {r['code']} → disqualified")
+    for r in ok:
+        src = os.path.join(base, 'candidates', r['code'])
+        dst = os.path.join(base, 'disqualified', r['code'])
+        if os.path.isdir(src) and not os.path.isdir(dst):
+            shutil.move(src, dst)
+            print(f"{_ts()} 迁移: {r['code']} → disqualified (观察)")
+
+    _update_comparison_doc(results, args.batch, good, ok, bad)
+
+
 def cmd_batch(args):
     """批量回测多只股票，生成个股报告 + 综合对比报告。所有回测逻辑复用 _run_backtest。"""
+    if args.all:
+        _run_all_batches(args)
+        return
+
     token = os.getenv('TUSHARE_TOKEN')
     if not token:
         print("错误: 未设置 TUSHARE_TOKEN，请在 .env 中配置")
@@ -382,19 +588,15 @@ def _update_comparison_doc(results, batch, good, ok, bad):
         return
 
     sr = sorted(results, key=lambda x: x['return'], reverse=True)
-    tag = lambda r: '✅ 合格' if r in good else ('⚠️ 仅2轮' if r in ok else '❌')
+    tag = lambda r: '✅ 合格' if r in good else ('⚠️ 仅'+str(r['trades'])+'轮' if r in ok else '❌')
     ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
-    industry = {
-        '600511': '医药商业', '000089': '机场', '000883': '水力发电',
-        '600572': '中成药', '600283': '水务', '000529': '食品',
-        '600008': '水务', '600018': '港口', '601128': '银行', '601139': '供气供热',
-    }
 
     new_rows = []
     for idx, r in enumerate(sr):
-        ind = industry.get(r['code'], '')
+        name = _get_stock_name(r['code'])
+        ind = _get_stock_industry(r['code'])
         new_rows.append(
-            f"| {batch} | {idx+1} | {r['code']} | {r['name']} | {ind} | "
+            f"| {batch} | {idx+1} | {r['code']} | {name} | {ind} | "
             f"{r['B']:.2f} | {r['S']:.2f} | {r['return']:.2f}% | "
             f"{ann_s(r)} | {r['trades']} | {r['step']} | {tag(r)} |")
 
@@ -475,8 +677,9 @@ def main():
     bt.set_defaults(func=cmd_backtest)
 
     ba = sub.add_parser('batch', help='批量回测 + 生成综合对比报告')
-    ba.add_argument('--codes', required=True, help='股票代码，逗号分隔，如 "601128,601139,600572"')
-    ba.add_argument('--batch', type=int, default=2, help='批次编号，用于报告命名')
+    ba.add_argument('--codes', default='', help='股票代码，逗号分隔（--all 模式下可省略）')
+    ba.add_argument('--batch', type=int, default=3, help='起始批次编号，用于报告命名')
+    ba.add_argument('--all', action='store_true', help='从个股名录中读取所有🔲标的，分批自动回测')
     ba.add_argument('--strategy', default='GridThresholdStrategy', help='策略类名')
     ba.add_argument('--start', default='2024-06-01', help='开始日期 (YYYY-MM-DD)')
     ba.add_argument('--end', default='2026-05-16', help='结束日期 (YYYY-MM-DD)')
