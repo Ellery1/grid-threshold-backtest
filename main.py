@@ -135,6 +135,8 @@ def _run_backtest(code, args, fetcher):
                 break
 
     complete = [t for t in best_trades if 'sell_date' in t]
+    trade_count = len(complete)
+    stability = 0.4 + 0.6 * min(trade_count / 10, 1.0)
     hd = [(t['sell_date'] - t['buy_date']).days for t in complete] if complete else []
     pro = [t.get('profit', 0) for t in complete]
     avg_profit = sum(pro) / len(pro) if pro else 0
@@ -149,6 +151,7 @@ def _run_backtest(code, args, fetcher):
         'return': round(metrics['total_return'], 2),
         'annual': round(metrics['annual_return'], 0),
         'score': round(best_score, 2),
+        'stability': round(stability, 2),
         'final_value': round(metrics['final_value'], 2),
         'trades': metrics['trade_count'],
         'win_rate': round(metrics['win_rate'], 0),
@@ -170,6 +173,8 @@ def _run_backtest(code, args, fetcher):
             'combinations': len(grid),
         },
     }
+    metrics['score'] = record['score']
+    metrics['stability'] = record['stability']
     return record, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params
 
 
@@ -402,7 +407,9 @@ def _run_single_batch(args):
             with _print_lock:
                 print(f"  {_ts()} [{code}] {len(df)}条 step={step} "
                       f"B={best_params['B']:.2f} S={best_params['S']:.2f} "
-                      f"ret={metrics['total_return']:.2f}% {metrics['trade_count']}t",
+                      f"ret={metrics['total_return']:.2f}% "
+                      f"score={record['score']:.2f} stb={record['stability']:.2f} "
+                      f"{metrics['trade_count']}t",
                       flush=True)
             return ('ok', record)
         except Exception as e:
@@ -662,7 +669,7 @@ def _update_comparison_doc(results, batch, good, ok, bad):
         new_rows.append(
             f"| {batch} | {r['code']} | {name} | {ind} | "
             f"{r['B']:.2f} | {r['S']:.2f} | "
-            f"**{r['return']:.2f}%** | **{r['score']:.2f}** | "
+            f"**{r['return']:.2f}%** | {r['stability']:.2f} | **{r['score']:.2f}** | "
             f"{ann_s(r)} | "
             f"{r['trades']} | "
             f"{step_display} | "

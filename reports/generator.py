@@ -52,8 +52,13 @@ class ReportGenerator:
         )
         lines.append(f"- 最优解：{param_desc}")
         lines.append(
-            f"- 最大收益率：**{result['total_return']:.2f}%**\n"
+            f"- 最大收益率：**{result['total_return']:.2f}%**"
         )
+        if 'score' in result:
+            lines.append(f"- 稳定性分：{result.get('stability', '—')}  "
+                         f"| 加权分数：**{result['score']}**\n")
+        else:
+            lines.append("")
 
         lines.append("---\n")
         lines.append("## 二、回测绩效\n")
@@ -74,6 +79,15 @@ class ReportGenerator:
         lines.append(
             f"| 完整交易轮次 | **{result['trade_count']} 轮**"
         )
+        if 'score' in result:
+            lines.append(
+                f"| 稳定性分 | {result['stability']:.2f} "
+                f"（0.4 + 0.6 × min({result['trade_count']}/10, 1)） |"
+            )
+            lines.append(
+                f"| 加权分数（score） | **{result['score']}** "
+                f"（收益率 × 稳定性分） |"
+            )
         lines.append(
             f"| 平均每轮持仓天数 | ~{result['avg_hold_days']:.1f} 个交易日 |"
         )
