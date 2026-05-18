@@ -195,11 +195,12 @@ class GridThresholdStrategy(BaseStrategy):
 
     def optimize(
         self, df: pd.DataFrame, param_grid: list[dict] = None
-    ) -> tuple[dict, float, list[dict]]:
+    ) -> tuple[dict, float, float, list[dict]]:
         if param_grid is None:
             param_grid = self.param_grid(df)
 
-        best_return = -float('inf')
+        best_score = -float('inf')
+        best_return = 0.0
         best_params = None
         best_trades = None
         total = len(param_grid)
@@ -213,8 +214,12 @@ class GridThresholdStrategy(BaseStrategy):
         for idx, params in enumerate(param_grid):
             final_value, trades, _ = self.backtest(df, params)
             total_return = (final_value - self.init_cash) / self.init_cash * 100
+            complete = len([t for t in trades if 'sell_date' in t])
+            stability = 0.4 + 0.6 * min(complete / 10, 1.0)
+            score = total_return * stability
 
-            if total_return > best_return:
+            if score > best_score:
+                best_score = score
                 best_return = total_return
                 best_params = params
                 best_trades = trades
@@ -225,8 +230,8 @@ class GridThresholdStrategy(BaseStrategy):
                     f"({(idx + 1) / total * 100:.1f}%), "
                     f"步长={step:.2f}, "
                     f"当前最优: B={best_params['B']:.2f} S={best_params['S']:.2f} "
-                    f"收益率={best_return:.2f}%",
+                    f"ret={best_return:.2f}% score={best_score:.2f}",
                     flush=True,
                 )
 
-        return best_params, best_return, best_trades
+        return best_params, best_score, best_return, best_trades

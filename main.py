@@ -119,7 +119,7 @@ def _run_backtest(code, args, fetcher):
 
     grid = strategy.param_grid(df)
 
-    best_params, best_return, best_trades = strategy.optimize(df, grid)
+    best_params, best_score, best_return, best_trades = strategy.optimize(df, grid)
     final_value, _, days = strategy.backtest(df, best_params)
     metrics = strategy.calc_metrics(final_value, best_trades, days)
 
@@ -148,6 +148,7 @@ def _run_backtest(code, args, fetcher):
         'spread_pct': round((best_params['S'] - best_params['B']) / best_params['B'] * 100, 1),
         'return': round(metrics['total_return'], 2),
         'annual': round(metrics['annual_return'], 0),
+        'score': round(best_score, 2),
         'final_value': round(metrics['final_value'], 2),
         'trades': metrics['trade_count'],
         'win_rate': round(metrics['win_rate'], 0),
@@ -322,7 +323,7 @@ def _run_all_batches(args):
         print(f"{_ts()} 没有待回测股票（全部已完成！）")
         return
 
-    batches = [codes[i:i + 10] for i in range(0, len(codes), 10)]
+    batches = [codes[i:i + 12] for i in range(0, len(codes), 12)]
     print(f"{_ts()} 全部待回测: {len(codes)} 只, 共 {len(batches)} 批\n")
 
     reports_dir = os.path.join(root, 'stocks')
@@ -421,10 +422,10 @@ def _run_single_batch(args):
     if failed_codes:
         print(f"\n{_ts()} ⚠️ 本批失败 {len(failed_codes)} 只: {', '.join(failed_codes)}")
 
-    sr = sorted(results, key=lambda x: x['return'], reverse=True)
-    good = [r for r in sr if r['trades'] >= 4 and r['return'] > 20]
-    ok = [r for r in sr if 2 <= r['trades'] < 4 and r['return'] > 10]
-    bad = [r for r in sr if r['trades'] < 2 or r['return'] <= 10]
+    sr = sorted(results, key=lambda x: x['score'], reverse=True)
+    good = [r for r in sr if r['trades'] >= 4 and r['score'] > 15]
+    ok = [r for r in sr if r not in good and r['trades'] >= 2 and r['score'] > 8]
+    bad = [r for r in sr if r not in good and r not in ok]
 
     today = datetime.now().strftime('%Y-%m-%d')
     fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -432,12 +433,13 @@ def _run_single_batch(args):
     lines = [f"# 网格策略对比 — 第{args.batch}批\n",
              f"> {args.start} ~ {args.end} | 本金{args.cash:,.0f} | 佣金{args.commission:.1%} | 固定不复利\n",
              "---\n## 一、综合排名\n",
-             "| # | 代码 | 名称 | B(元) | S(元) | 价差% | 收益率 | 年化 | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 步长 | 组合数 |",
+             "| # | 代码 | 名称 | B(元) | S(元) | 收益率 | 加权分数 | 年化率% | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 步长 | 组合数 |",
              "|---|------|------|------:|------:|------:|------:|-----:|--------:|-----:|--------:|--------:|--------:|-----:|------:|"]
     for i, r in enumerate(sr):
         lines.append(f"| {i+1} | {r['code']} | {r['name']} | "
-                     f"{r['B']:.2f} | {r['S']:.2f} | {r['spread_pct']:.1f}% | "
-                     f"**{r['return']:.2f}%** | ~{r['annual']:.0f}% | "
+                     f"{r['B']:.2f} | {r['S']:.2f} | "
+                     f"**{r['return']:.2f}%** | **{r['score']:.2f}** | "
+                     f"~{r['annual']:.0f}% | "
                      f"{r['trades']} | {r['win_rate']:.0f}% | "
                      f"{r['avg_hold']:.1f} | {r['max_hold']} | {r['avg_profit']:,.0f} | "
                      f"{r['step']} | {r['combos']} |")
@@ -546,10 +548,10 @@ def cmd_batch(args):
     if len(results) < 2:
         return
 
-    sr = sorted(results, key=lambda x: x['return'], reverse=True)
-    good = [r for r in sr if r['trades'] >= 4 and r['return'] > 20]
-    ok = [r for r in sr if 2 <= r['trades'] < 4 and r['return'] > 10]
-    bad = [r for r in sr if r['trades'] < 2 or r['return'] <= 10]
+    sr = sorted(results, key=lambda x: x['score'], reverse=True)
+    good = [r for r in sr if r['trades'] >= 4 and r['score'] > 15]
+    ok = [r for r in sr if r not in good and r['trades'] >= 2 and r['score'] > 8]
+    bad = [r for r in sr if r not in good and r not in ok]
 
     today = datetime.now().strftime('%Y-%m-%d')
     fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -557,12 +559,13 @@ def cmd_batch(args):
     lines = [f"# 网格策略对比 — 第{args.batch}批\n",
              f"> {args.start} ~ {args.end} | 本金{args.cash:,.0f} | 佣金{args.commission:.1%} | 固定不复利\n",
              "---\n## 一、综合排名\n",
-             "| # | 代码 | 名称 | B(元) | S(元) | 价差% | 收益率 | 年化 | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 箱体(元) | 步长(元) |",
+             "| # | 代码 | 名称 | B(元) | S(元) | 收益率 | 加权分数 | 年化率% | 交易(轮) | 胜率 | 均持(天) | 最长(天) | 均利(元) | 箱体(元) | 步长(元) |",
              "|---|------|------|------:|------:|------:|------:|-----:|--------:|-----:|--------:|--------:|--------:|---------|--------:|"]
     for i, r in enumerate(sr):
         lines.append(f"| {i+1} | {r['code']} | {r['name']} | "
-                     f"{r['B']:.2f} | {r['S']:.2f} | {r['spread_pct']:.1f}% | "
-                     f"**{r['return']:.2f}%** | ~{r['annual']:.0f}% | "
+                     f"{r['B']:.2f} | {r['S']:.2f} | "
+                     f"**{r['return']:.2f}%** | **{r['score']:.2f}** | "
+                     f"~{r['annual']:.0f}% | "
                      f"{r['trades']} | {r['win_rate']:.0f}% | "
                      f"{r['avg_hold']:.1f} | {r['max_hold']} | {r['avg_profit']:,.0f} | "
                      f"{r['price_min']:.2f}~{r['price_max']:.2f} | {r['step']} |")
@@ -647,7 +650,7 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     if insert_pos is None:
         return
 
-    sr = sorted(results, key=lambda x: x['return'], reverse=True)
+    sr = sorted(results, key=lambda x: x['score'], reverse=True)
     tag = lambda r: '✅ 合格' if r in good else ('⚠️ 仅'+str(r['trades'])+'轮' if r in ok else '❌')
     ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
 
@@ -655,13 +658,11 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     for r in sr:
         name = _get_stock_name(r['code'])
         ind = _get_stock_industry(r['code'])
-        spread = r.get('spread_pct', round((r['S'] - r['B']) / r['B'] * 100, 1))
         step_display = round(float(r['step']), 2) if r.get('step') else 0.01
         new_rows.append(
             f"| {batch} | {r['code']} | {name} | {ind} | "
             f"{r['B']:.2f} | {r['S']:.2f} | "
-            f"{spread:.1f}% | "
-            f"**{r['return']:.2f}%** | "
+            f"**{r['return']:.2f}%** | **{r['score']:.2f}** | "
             f"{ann_s(r)} | "
             f"{r['trades']} | "
             f"{step_display} | "
@@ -670,8 +671,11 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     for row in reversed(new_rows):
         lines.insert(insert_pos, row)
 
-    passed = sum(1 for line in lines[insert_pos:insert_pos+len(new_rows)] if '✅' in line)
-    total_data = sum(1 for line in lines if line.strip().startswith('|') and line.strip().count('|') >= 8)
+    passed = sum(1 for line in lines if '|' in line and '✅' in line)
+    total_data = sum(1 for line in lines
+                     if line.strip().startswith('|')
+                     and line.strip().count('|') >= 8
+                     and line.strip()[2:3].isdigit())
 
     for i, line in enumerate(lines):
         if '总计已回测' in line:
