@@ -21,6 +21,27 @@ def _ts():
     return time.strftime('%H:%M:%S')
 
 
+def _classify(r):
+    """四档评级：优秀/合格/观察/不适合"""
+    t = r['trades']
+    a = r['annual']
+    if (t >= 15 and a >= 25) or (t >= 12 and a >= 30):
+        return 'excellent'
+    if t >= 12 and a >= 20:
+        return 'good'
+    if t >= 8 and a >= 15:
+        return 'ok'
+    return 'bad'
+
+
+_CLASSIFY_TAG = {
+    'excellent': '🌟 优秀',
+    'good': '✅ 合格',
+    'ok': '⚠️ 观察',
+    'bad': '❌ 不适合',
+}
+
+
 SUBDIRS = ['qualified', 'disqualified', 'candidates']
 _cached_names = {}
 
@@ -430,9 +451,10 @@ def _run_single_batch(args):
         print(f"\n{_ts()} ⚠️ 本批失败 {len(failed_codes)} 只: {', '.join(failed_codes)}")
 
     sr = sorted(results, key=lambda x: x['score'], reverse=True)
-    good = [r for r in sr if r['trades'] >= 4 and r['score'] > 15]
-    ok = [r for r in sr if r not in good and r['trades'] >= 2 and r['score'] > 8]
-    bad = [r for r in sr if r not in good and r not in ok]
+    excellent = [r for r in sr if _classify(r) == 'excellent']
+    good = [r for r in sr if _classify(r) == 'good']
+    ok = [r for r in sr if _classify(r) == 'ok']
+    bad = [r for r in sr if _classify(r) == 'bad']
 
     today = datetime.now().strftime('%Y-%m-%d')
     fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -454,7 +476,8 @@ def _run_single_batch(args):
     lines.append("---\n## 二、分类\n")
     lines.append(f"| 评级 | 数量 | 标的 |")
     lines.append(f"|------|------|------|")
-    lines.append(f"| ✅ 合格(≥4轮) | {len(good)} | {', '.join(r['name'] for r in good) if good else '—'} |")
+    lines.append(f"| 🌟 优秀 | {len(excellent)} | {', '.join(r['name'] for r in excellent) if excellent else '—'} |")
+    lines.append(f"| ✅ 合格 | {len(good)} | {', '.join(r['name'] for r in good) if good else '—'} |")
     lines.append(f"| ⚠️ 观察 | {len(ok)} | {', '.join(r['name'] for r in ok) if ok else '—'} |")
     lines.append(f"| ❌ 不适合 | {len(bad)} | {', '.join(r['name'] for r in bad) if bad else '—'} |")
     lines.append("")
@@ -463,30 +486,24 @@ def _run_single_batch(args):
     with open(fp, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
     print(f"\n{_ts()} 报告: {os.path.basename(fp)}")
-    print(f"{_ts()} ✅{len(good)} ⚠️{len(ok)} ❌{len(bad)}")
+    print(f"{_ts()} 🌟{len(excellent)} ✅{len(good)} ⚠️{len(ok)} ❌{len(bad)}")
 
     import shutil
     base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stocks')
-    for r in good:
+    for r in excellent + good:
         src = os.path.join(base, 'candidates', r['code'])
         dst = os.path.join(base, 'qualified', r['code'])
         if os.path.isdir(src) and not os.path.isdir(dst):
             shutil.move(src, dst)
             print(f"{_ts()} 迁移: {r['code']} → qualified")
-    for r in bad:
+    for r in bad + ok:
         src = os.path.join(base, 'candidates', r['code'])
         dst = os.path.join(base, 'disqualified', r['code'])
         if os.path.isdir(src) and not os.path.isdir(dst):
             shutil.move(src, dst)
             print(f"{_ts()} 迁移: {r['code']} → disqualified")
-    for r in ok:
-        src = os.path.join(base, 'candidates', r['code'])
-        dst = os.path.join(base, 'disqualified', r['code'])
-        if os.path.isdir(src) and not os.path.isdir(dst):
-            shutil.move(src, dst)
-            print(f"{_ts()} 迁移: {r['code']} → disqualified (观察)")
 
-    _update_comparison_doc(results, args.batch, good, ok, bad)
+    _update_comparison_doc(results, args.batch, excellent, good, ok, bad)
     return failed_codes
 
 
@@ -556,9 +573,10 @@ def cmd_batch(args):
         return
 
     sr = sorted(results, key=lambda x: x['score'], reverse=True)
-    good = [r for r in sr if r['trades'] >= 4 and r['score'] > 15]
-    ok = [r for r in sr if r not in good and r['trades'] >= 2 and r['score'] > 8]
-    bad = [r for r in sr if r not in good and r not in ok]
+    excellent = [r for r in sr if _classify(r) == 'excellent']
+    good = [r for r in sr if _classify(r) == 'good']
+    ok = [r for r in sr if _classify(r) == 'ok']
+    bad = [r for r in sr if _classify(r) == 'bad']
 
     today = datetime.now().strftime('%Y-%m-%d')
     fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -580,14 +598,15 @@ def cmd_batch(args):
     lines.append("---\n## 二、分类评估\n")
     lines.append(f"| 评级 | 数量 | 标的 |")
     lines.append(f"|------|------|------|")
-    lines.append(f"| ✅ 合格(≥4轮) | {len(good)} | {', '.join(r['name'] for r in good) if good else '—'} |")
+    lines.append(f"| 🌟 优秀 | {len(excellent)} | {', '.join(r['name'] for r in excellent) if excellent else '—'} |")
+    lines.append(f"| ✅ 合格 | {len(good)} | {', '.join(r['name'] for r in good) if good else '—'} |")
     lines.append(f"| ⚠️ 观察 | {len(ok)} | {', '.join(r['name'] for r in ok) if ok else '—'} |")
     lines.append(f"| ❌ 不适合 | {len(bad)} | {', '.join(r['name'] for r in bad) if bad else '—'} |")
     lines.append("")
 
     from datetime import date as date_cls
     for i, r in enumerate(sr):
-        tag = '✅' if r in good else ('⚠️' if r in ok else '❌')
+        tag = _CLASSIFY_TAG[_classify(r)]
         lines.append(f"### {i+1}. {r['code']} {r['name']} {tag}\n")
         lines.append(f"B={r['B']:.2f} S={r['S']:.2f}（{r['spread_pct']:.1f}%）| "
                      f"{r['return']:.2f}% | {r['trades']}轮 | 均持{r['avg_hold']:.1f}天 | 步长{r['step']}\n")
@@ -633,10 +652,10 @@ def cmd_batch(args):
             shutil.move(src, dst)
             print(f"  迁移: {r['code']} → disqualified (观察)")
 
-    _update_comparison_doc(results, args.batch, good, ok, bad)
+    _update_comparison_doc(results, args.batch, excellent, good, ok, bad)
 
 
-def _update_comparison_doc(results, batch, good, ok, bad):
+def _update_comparison_doc(results, batch, excellent, good, ok, bad):
     """追加本批结果到 A类股_网格搜索_横向对比.md"""
     cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        'A类股_网格搜索_横向对比.md')
@@ -658,9 +677,8 @@ def _update_comparison_doc(results, batch, good, ok, bad):
         return
 
     sr = sorted(results, key=lambda x: x['score'], reverse=True)
-    tag = lambda r: '✅ 合格' if r in good else ('⚠️ 仅'+str(r['trades'])+'轮' if r in ok else '❌')
-    ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
 
+    ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
     new_rows = []
     for r in sr:
         name = _get_stock_name(r['code'])
@@ -673,12 +691,13 @@ def _update_comparison_doc(results, batch, good, ok, bad):
             f"{ann_s(r)} | "
             f"{r['trades']} | "
             f"{step_display} | "
-            f"{tag(r)} |")
+            f"{_CLASSIFY_TAG[_classify(r)]} |")
 
     for row in reversed(new_rows):
         lines.insert(insert_pos, row)
 
-    passed = sum(1 for line in lines if '|' in line and '✅' in line)
+    passed = sum(1 for line in lines if '|' in line and ('🌟' in line or '✅' in line))
+    excellent_count = sum(1 for line in lines if '|' in line and '🌟' in line)
     total_data = sum(1 for line in lines
                      if line.strip().startswith('|')
                      and line.strip().count('|') >= 8
@@ -687,8 +706,8 @@ def _update_comparison_doc(results, batch, good, ok, bad):
     for i, line in enumerate(lines):
         if '总计已回测' in line:
             lines[i] = f'- 总计已回测：**{total_data}** 只'
-        if '合格可实盘' in line and '✅' in line:
-            lines[i] = f'- ✅ 合格可实盘：**{passed}** 只'
+        if '优秀+合格' in line and '🌟' in line:
+            lines[i] = f'- 🌟 优秀 + ✅ 合格：**{passed}** 只（🌟{excellent_count} + ✅{passed - excellent_count}）'
 
     with open(cmp, 'w', encoding='utf-8') as f:
         f.write('\n'.join(lines))
