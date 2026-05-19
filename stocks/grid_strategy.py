@@ -8,34 +8,41 @@ from stocks.base import BaseStrategy, Signal
 
 
 class GridThresholdStrategy(BaseStrategy):
-    def param_grid(self, df: pd.DataFrame) -> list[dict]:
+    def param_grid(self, df: pd.DataFrame, force_step: float = None) -> list[dict]:
         lo = float(df['low'].min())
         hi = float(df['high'].max())
         p50 = float(df['close'].median())
 
-        if p50 <= 5:
-            base_step = 0.01
-        elif p50 <= 10:
-            base_step = 0.02
-        elif p50 <= 50:
-            base_step = 0.1
-        elif p50 <= 100:
-            base_step = 0.5
+        if force_step is not None:
+            step = force_step
         else:
-            base_step = 1
+            if p50 <= 5:
+                base_step = 0.01
+            elif p50 <= 10:
+                base_step = 0.02
+            elif p50 <= 50:
+                base_step = 0.1
+            elif p50 <= 100:
+                base_step = 0.5
+            else:
+                base_step = 1
 
-        candidates = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5]
-        step_idx = candidates.index(base_step) if base_step in candidates else 0
+            candidates = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5]
+            step_idx = candidates.index(base_step) if base_step in candidates else 0
 
-        while step_idx < len(candidates):
-            step = candidates[step_idx]
-            window_lo = round(lo, 2)
-            window_hi = round(hi, 2)
-            rng = np.round(np.arange(window_lo, window_hi + step, step), 2)
-            total = len(rng) * (len(rng) - 1) // 2
-            if total <= 20000:
-                break
-            step_idx += 1
+            while step_idx < len(candidates):
+                step = candidates[step_idx]
+                window_lo = round(lo, 2)
+                window_hi = round(hi, 2)
+                rng = np.round(np.arange(window_lo, window_hi + step, step), 2)
+                total = len(rng) * (len(rng) - 1) // 2
+                if total <= 20000:
+                    break
+                step_idx += 1
+
+        window_lo = round(lo, 2)
+        window_hi = round(hi, 2)
+        rng = np.round(np.arange(window_lo, window_hi + step, step), 2)
 
         result = []
         for b in rng:

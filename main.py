@@ -122,7 +122,7 @@ def _ensure_stock_dir(code, start, end):
                 f'BEST_BUY=None\nBEST_SELL=None\n')
 
 
-def _run_backtest(code, args, fetcher):
+def _run_backtest(code, args, fetcher, force_step=None):
     """回测单只股票（线程安全，不依赖 importlib）"""
     from stocks.grid_strategy import GridThresholdStrategy
 
@@ -138,7 +138,7 @@ def _run_backtest(code, args, fetcher):
         commission=args.commission,
     )
 
-    grid = strategy.param_grid(df)
+    grid = strategy.param_grid(df, force_step=force_step)
 
     best_params, best_score, best_return, best_trades = strategy.optimize(df, grid)
     final_value, _, days = strategy.backtest(df, best_params)
@@ -714,6 +714,135 @@ def _update_comparison_doc(results, batch, excellent, good, ok, bad):
     print(f"  {_ts()} 横向对比已更新")
 
 
+def cmd_round3(args):
+    """第三轮精细化回测：对 A类股_优秀及合格标的.md 中步长≥0.05的标的降档复测"""
+    token = os.getenv('TUSHARE_TOKEN')
+    if not token:
+        print("错误: 未设置 TUSHARE_TOKEN")
+        sys.exit(1)
+
+    ts.set_token(token)
+
+    cmp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       'A类股_优秀及合格标的.md')
+    if not os.path.exists(cmp):
+        print(f"错误: 找不到 {cmp}")
+        sys.exit(1)
+
+    STEP_DOWNGRADE = {
+        '0.05': 0.02,
+        '0.1': 0.02,
+        '0.2': 0.05,
+        '0.5': 0.05,
+    }
+
+    codes_to_refine = []
+    with open(cmp, encoding='utf-8') as f:
+        for line in f:
+            s = line.strip()
+            if not s.startswith('|') or s.count('|') < 11:
+                continue
+            parts = [p.strip() for p in s.split('|')]
+            code = parts[2]
+            if not code.isdigit() or len(code) != 6:
+                continue
+            name = parts[3]
+            step_str = parts[12]
+            if step_str not in STEP_DOWNGRADE:
+                continue
+            codes_to_refine.append((code, name, step_str, STEP_DOWNGRADE[step_str]))
+
+    print(f"{_ts()} 第三轮精细化回测：{len(codes_to_refine)} 只待降档")
+    for code, name, old_step, new_step in codes_to_refine:
+        print(f"  {code} {name}: step {old_step} → {new_step}")
+
+    results = []
+    _print_lock = threading.Lock()
+
+    def _backtest_one(code, name, force_step_val):
+        try:
+            time.sleep(random.uniform(0.1, 0.8))
+            fetcher = DataFetcher()
+            record, metrics, best_trades, lo, hi, p50, step, strategy, df, grid, best_params = \
+                _run_backtest(code, args, fetcher, force_step=force_step_val)
+            with _print_lock:
+                print(f"  {_ts()} [{code}] {len(df)}条 grid={len(grid)} "
+                      f"B={best_params['B']:.2f} S={best_params['S']:.2f} "
+                      f"ret={metrics['total_return']:.2f}% "
+                      f"score={record['score']:.2f} stb={record['stability']:.2f} "
+                      f"{metrics['trade_count']}t",
+                      flush=True)
+            return ('ok', record, best_params, metrics)
+        except Exception as e:
+            with _print_lock:
+                print(f"  {_ts()} [{code}] **失败**: {e}", flush=True)
+            return ('fail', code)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {}
+        for code, name, old_step, new_step in codes_to_refine:
+            futures[ex.submit(_backtest_one, code, name, new_step)] = (code, name)
+        for fut in as_completed(futures):
+            status = fut.result()
+            if status[0] == 'ok':
+                results.append(status[1:])
+
+    # ── append to md ──
+    with open(cmp, encoding='utf-8') as f:
+        lines = f.read().split('\n')
+
+    header = '| 批 | 代码 | 名称 | 行业 | B(元) | S(元) | 收益率 | 稳定性分 | 加权分数 | 年化率% | 交易(轮) | 步长 | 合格? |'
+    sep   = '|:---:|---:|------|------|------:|------:|------:|------:|------:|-----:|--------:|-----:|-------|'
+
+    cut = None
+    for i, line in enumerate(lines):
+        if '精细步长复测' in line:
+            cut = i + 1
+            break
+    if cut is None:
+        lines.append('')
+        lines.append('---')
+        lines.append('')
+        lines.append('## 🔬 精细步长复测（降档步长）')
+        lines.append('')
+        lines.append('> 降档规则：0.05→0.02 | 0.1→0.02 | 0.2→0.05 | 0.5→0.05')
+        lines.append('')
+        lines.append(header)
+        lines.append(sep)
+        cut = len(lines)
+    else:
+        lines.insert(cut, '')
+        lines.insert(cut, '')
+        lines.insert(cut, sep)
+        lines.insert(cut, header)
+
+    sr = sorted(results, key=lambda x: x[0]['score'], reverse=True)
+    ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
+    inserted = 0
+    for record, best_params, metrics in sr:
+        name = _get_stock_name(record['code'])
+        ind = _get_stock_industry(record['code'])
+        step_display = round(float(record['step']), 2)
+        tag = _CLASSIFY_TAG[_classify(record)]
+        row = (
+            f"| 3 | {record['code']} | {name} | {ind} | "
+            f"{best_params['B']:.2f} | {best_params['S']:.2f} | "
+            f"**{record['return']:.2f}%** | {record['stability']:.2f} | "
+            f"**{record['score']:.2f}** | "
+            f"{ann_s(record)} | "
+            f"{record['trades']} | "
+            f"{step_display} | "
+            f"{tag} |"
+        )
+        lines.insert(cut, row)
+        inserted += 1
+
+    with open(cmp, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+    print(f"\n{_ts()} 第三轮完成。{inserted} 只已追加到 {os.path.basename(cmp)}")
+
+
 def cmd_daemon(args):
     token = os.getenv('TUSHARE_TOKEN')
     if not token:
@@ -794,6 +923,13 @@ def main():
     ba.add_argument('--commission', type=float, default=0.001, help='佣金率')
     ba.add_argument('--no-report', action='store_true', help='不生成个股报告')
     ba.set_defaults(func=cmd_batch)
+
+    r3 = sub.add_parser('round3', help='第三轮精细化回测：对优秀+合格标的强制small step')
+    r3.add_argument('--start', default='2024-06-01', help='开始日期')
+    r3.add_argument('--end', default='2026-05-16', help='结束日期')
+    r3.add_argument('--cash', type=float, default=100000, help='初始本金')
+    r3.add_argument('--commission', type=float, default=0.001, help='佣金率')
+    r3.set_defaults(func=cmd_round3)
 
     cp = sub.add_parser('compare', help='多参数对比')
     cp.add_argument('--code', default='000727', help='股票代码')
