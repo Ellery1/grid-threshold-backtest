@@ -758,6 +758,23 @@ def cmd_round3(args):
 
     results = []
     _print_lock = threading.Lock()
+    _file_lock = threading.Lock()
+
+    # ── ensure header section exists once ──
+    header = '| 批 | 代码 | 名称 | 行业 | B(元) | S(元) | 收益率 | 稳定性分 | 加权分数 | 年化率% | 交易(轮) | 步长 | 合格? |'
+    sep   = '|:---:|---:|------|------|------:|------:|------:|------:|------:|-----:|--------:|-----:|-------|'
+    need_header = True
+    with open(cmp, encoding='utf-8') as f:
+        for line in f:
+            if '精细步长复测' in line:
+                need_header = False
+                break
+    if need_header:
+        with open(cmp, 'a', encoding='utf-8') as f:
+            f.write('\n---\n\n## 🔬 精细步长复测（降档步长）\n\n')
+            f.write('> 降档规则：0.05→0.02 | 0.1→0.02 | 0.2→0.05 | 0.5→0.05\n\n')
+            f.write(header + '\n')
+            f.write(sep + '\n')
 
     def _backtest_one(code, name, force_step_val):
         try:
@@ -772,7 +789,24 @@ def cmd_round3(args):
                       f"score={record['score']:.2f} stb={record['stability']:.2f} "
                       f"{metrics['trade_count']}t",
                       flush=True)
-            return ('ok', record, best_params, metrics)
+            ann_s = f"{record['annual']:.0f}%" if record['annual'] else '—'
+            step_display = round(float(record['step']), 2)
+            tag = _CLASSIFY_TAG[_classify(record)]
+            ind = _get_stock_industry(record['code'])
+            row = (
+                f"| 3 | {record['code']} | {name} | {ind} | "
+                f"{best_params['B']:.2f} | {best_params['S']:.2f} | "
+                f"**{record['return']:.2f}%** | {record['stability']:.2f} | "
+                f"**{record['score']:.2f}** | "
+                f"{ann_s} | "
+                f"{record['trades']} | "
+                f"{step_display} | "
+                f"{tag} |\n"
+            )
+            with _file_lock:
+                with open(cmp, 'a', encoding='utf-8') as f:
+                    f.write(row)
+            return ('ok',)
         except Exception as e:
             with _print_lock:
                 print(f"  {_ts()} [{code}] **失败**: {e}", flush=True)
@@ -787,60 +821,7 @@ def cmd_round3(args):
             if status[0] == 'ok':
                 results.append(status[1:])
 
-    # ── append to md ──
-    with open(cmp, encoding='utf-8') as f:
-        lines = f.read().split('\n')
-
-    header = '| 批 | 代码 | 名称 | 行业 | B(元) | S(元) | 收益率 | 稳定性分 | 加权分数 | 年化率% | 交易(轮) | 步长 | 合格? |'
-    sep   = '|:---:|---:|------|------|------:|------:|------:|------:|------:|-----:|--------:|-----:|-------|'
-
-    cut = None
-    for i, line in enumerate(lines):
-        if '精细步长复测' in line:
-            cut = i + 1
-            break
-    if cut is None:
-        lines.append('')
-        lines.append('---')
-        lines.append('')
-        lines.append('## 🔬 精细步长复测（降档步长）')
-        lines.append('')
-        lines.append('> 降档规则：0.05→0.02 | 0.1→0.02 | 0.2→0.05 | 0.5→0.05')
-        lines.append('')
-        lines.append(header)
-        lines.append(sep)
-        cut = len(lines)
-    else:
-        lines.insert(cut, '')
-        lines.insert(cut, '')
-        lines.insert(cut, sep)
-        lines.insert(cut, header)
-
-    sr = sorted(results, key=lambda x: x[0]['score'], reverse=True)
-    ann_s = lambda r: f"{r['annual']:.0f}%" if r['annual'] else '—'
-    inserted = 0
-    for record, best_params, metrics in sr:
-        name = _get_stock_name(record['code'])
-        ind = _get_stock_industry(record['code'])
-        step_display = round(float(record['step']), 2)
-        tag = _CLASSIFY_TAG[_classify(record)]
-        row = (
-            f"| 3 | {record['code']} | {name} | {ind} | "
-            f"{best_params['B']:.2f} | {best_params['S']:.2f} | "
-            f"**{record['return']:.2f}%** | {record['stability']:.2f} | "
-            f"**{record['score']:.2f}** | "
-            f"{ann_s(record)} | "
-            f"{record['trades']} | "
-            f"{step_display} | "
-            f"{tag} |"
-        )
-        lines.insert(cut, row)
-        inserted += 1
-
-    with open(cmp, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
-
-    print(f"\n{_ts()} 第三轮完成。{inserted} 只已追加到 {os.path.basename(cmp)}")
+    print(f"\n{_ts()} 第三轮完成。{len(results)} 只已追加到 {os.path.basename(cmp)}")
 
 
 def cmd_daemon(args):
